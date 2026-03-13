@@ -51,19 +51,31 @@ async def analizar_archivo(file: UploadFile = File(...)):
     nombre_archivo = file.filename.lower() if file.filename else ""
     tipo_contenido = file.content_type if file.content_type else ""
     
-    # 1. EXTRACCIÓN IMAGEN
+    # ---------------------------------------------------------
+    # 1. ANÁLISIS DE IMÁGENES
+    # ---------------------------------------------------------
     if tipo_contenido.startswith("image/") or nombre_archivo.endswith(('.png', '.jpg', '.jpeg')):
         try:
             imagen = Image.open(io.BytesIO(contenido))
-            info_exif = imagen._getexif()
-            if info_exif:
-                for tag_id, valor in info_exif.items():
+            
+            # A) Buscar metadatos antiguos (EXIF - JPEGs)
+            if hasattr(imagen, '_getexif') and imagen._getexif():
+                for tag_id, valor in imagen._getexif().items():
                     nombre_tag = TAGS.get(tag_id, tag_id)
-                    metadatos_extraidos[nombre_tag] = str(valor)
-            else:
-                metadatos_extraidos = {"aviso": "Imagen sin metadatos EXIF"}
+                    metadatos_extraidos[f"EXIF_{nombre_tag}"] = str(valor)
+            
+            # B) Buscar metadatos modernos (Text Chunks - PNGs generados por IA)
+            if imagen.info:
+                for clave, valor in imagen.info.items():
+                    # Filtramos datos binarios (como perfiles de color icc) para solo guardar texto
+                    if isinstance(valor, str) or isinstance(valor, bytes):
+                        metadatos_extraidos[f"PNG_{clave}"] = str(valor)
+
+            if not metadatos_extraidos:
+                metadatos_extraidos = {"aviso": "Imagen completamente limpia (sin EXIF ni PNG Chunks)"}
+                
         except Exception as e:
-            metadatos_extraidos = {"error": f"Error al extraer datos: {str(e)}"}
+            metadatos_extraidos = {"error": f"Error al extraer datos de imagen: {str(e)}"}
 
     # 2. EXTRACCIÓN PDF
     elif tipo_contenido == "application/pdf" or nombre_archivo.endswith('.pdf'):
