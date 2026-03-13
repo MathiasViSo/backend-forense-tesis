@@ -21,24 +21,79 @@ FIRMAS_IA = [
     "adobe firefly", "generative fill", "ai generated", "comfyui", "bing"
 ]
 
-def analizar_pixeles_ia(imagen_bytes: bytes) -> tuple:
-    """Envía la imagen a la red neuronal para análisis de píxeles."""
-    try:
-        response = requests.post(API_URL, headers=headers, data=imagen_bytes)
-        if response.status_code == 200:
-            resultados = response.json()
-            # El modelo devuelve una lista, ej: [{'label': 'artificial', 'score': 0.98}, {'label': 'human', 'score': 0.02}]
-            for res in resultados:
-                if res.get("label") == "artificial":
-                    probabilidad = res.get("score", 0) * 100
-                    if probabilidad > 65:  # Umbral de confianza del 65%
-                        return True, round(probabilidad, 2)
-        return False, 0.0
-    except Exception as e:
-        print(f"Error conectando a Hugging Face: {e}")
-        return False, 0.0
-
 def evaluar_presencia_ia(metadatos: dict, contenido_crudo: bytes, es_imagen: bool) -> dict:
+    """Análisis híbrido: 1ro Metadatos (Estático), 2do Píxeles (Red Neuronal)"""
+    texto_evidencia = str(metadatos).lower()
+    texto_binario = contenido_crudo.decode('utf-8', errors='ignore').lower()
+    
+    # 1. FILTRO ESTÁTICO (Metadatos y Bytes)
+    for firma in FIRMAS_IA:
+        if firma in texto_evidencia or firma in texto_binario:
+            return {
+                "detectado": True,
+                "nivel_riesgo": "ALTO",
+                "metodo": "Análisis Estático (Firmas/Metadatos)",
+                "motivo": f"Se encontró la firma '{firma.upper()}' incrustada en el archivo."
+            }
+            
+    # 2. FILTRO NEURONAL (Píxeles)
+    if es_imagen:
+        try:
+            # Enviamos a Hugging Face
+            response = requests.post(API_URL, headers=headers, data=contenido_crudo)
+            
+            if response.status_code == 200:
+                resultados = response.json()
+                # Buscamos si detecta IA (ampliamos las palabras clave por si acaso)
+                for res in resultados:
+                    etiqueta = str(res.get("label", "")).lower()
+                    if etiqueta in ["artificial", "fake", "ai", "generated"]:
+                        probabilidad = res.get("score", 0) * 100
+                        if probabilidad > 50:
+                            return {
+                                "detectado": True,
+                                "nivel_riesgo": "ALTO",
+                                "metodo": "Análisis de Píxeles (Hugging Face)",
+                                "motivo": f"Red neuronal detectó '{etiqueta}' con {probabilidad:.2f}% de certeza."
+                            }
+                # Si respondió bien pero no detectó IA, mostramos qué fue lo que vio
+                return {
+                    "detectado": False,
+                    "nivel_riesgo": "BAJO",
+                    "metodo": "Análisis de Píxeles (Hugging Face)",
+                    "motivo": f"Resultados crudos del modelo: {resultados}"
+                }
+                
+            elif response.status_code == 503:
+                return {
+                    "detectado": False,
+                    "nivel_riesgo": "DESCONOCIDO",
+                    "metodo": "Hugging Face Cargando",
+                    "motivo": "El servidor de IA está 'despertando'. Espera 30 segundos y vuelve a presionar Analizar."
+                }
+            else:
+                return {
+                    "detectado": False,
+                    "nivel_riesgo": "ERROR",
+                    "metodo": f"Fallo API (HTTP {response.status_code})",
+                    "motivo": f"Respuesta de Hugging Face: {response.text}"
+                }
+        except Exception as e:
+            return {
+                "detectado": False,
+                "nivel_riesgo": "ERROR",
+                "metodo": "Fallo Interno",
+                "motivo": f"Error de conexión: {str(e)}"
+            }
+
+    # Si no es imagen y pasó el filtro 1
+    return {
+        "detectado": False,
+        "nivel_riesgo": "BAJO",
+        "metodo": "Análisis Estático",
+        "motivo": "No es una imagen, y no se encontraron firmas en el texto."
+    }
+    
     """Análisis híbrido: 1ro Metadatos (Estático), 2do Píxeles (Red Neuronal)"""
     texto_evidencia = str(metadatos).lower()
     texto_binario = contenido_crudo.decode('utf-8', errors='ignore').lower()
