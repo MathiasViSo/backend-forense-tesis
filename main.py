@@ -12,7 +12,7 @@ app = FastAPI()
 # --- CONFIGURACIÓN DE HUGGING FACE (Segura) ---
 # Ahora lee la variable secreta desde el servidor de Render
 TOKEN_HF = os.environ.get("HUGGINGFACE_TOKEN") 
-API_URL = "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector"
+API_URL = "https://api-inference.huggingface.co/models/dima806/ai_vs_real_image_detection"
 headers = {"Authorization": f"Bearer {TOKEN_HF}"}
 
 
@@ -93,7 +93,7 @@ def evaluar_presencia_ia(metadatos: dict, contenido_crudo: bytes, es_imagen: boo
         "metodo": "Análisis Estático",
         "motivo": "No es una imagen, y no se encontraron firmas en el texto."
     }
-    
+
     """Análisis híbrido: 1ro Metadatos (Estático), 2do Píxeles (Red Neuronal)"""
     texto_evidencia = str(metadatos).lower()
     texto_binario = contenido_crudo.decode('utf-8', errors='ignore').lower()
