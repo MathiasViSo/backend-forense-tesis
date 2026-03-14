@@ -13,7 +13,6 @@ import tempfile
 app = FastAPI()
 
 HF_TOKEN = os.getenv("HF_TOKEN")
-# Usamos un modelo especializado en Deepfakes y rostros alterados
 MODELS = {
     "IMAGE": "umm-maybe/AI-image-detector", 
     "AUDIO": "ResembleAI/ai_detector_audio"
@@ -22,60 +21,59 @@ MODELS = {
 FIRMAS_IA = [
     "midjourney", "dall-e", "stable diffusion", "adobe firefly", 
     "generative fill", "ai generated", "comfyui", "synthid", 
-    "lyria", "veo", "gemini", "deepfake", "roop"
+    "lyria", "veo", "gemini", "deepfake", "roop", "bing"
 ]
 
-# Inicializamos el detector facial nativo de OpenCV
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 def consultar_modelo_hf(contenido_bytes: bytes, tipo: str):
-    """Consulta a la API de Hugging Face con manejo de errores."""
     if not HF_TOKEN or tipo not in MODELS:
         return None
-    
     url = f"https://api-inference.huggingface.co/models/{MODELS[tipo]}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    
     try:
         response = requests.post(url, headers=headers, data=contenido_bytes)
         resultado = response.json()
-        # Hugging Face a veces devuelve una lista, a veces un dict con error
         if isinstance(resultado, list) and len(resultado) > 0:
-            return resultado[0] # Retornamos la predicción más alta
+            return resultado[0] 
         return resultado
     except Exception as e:
         return {"error": str(e)}
 
 def analizar_imagen_aislada(imagen_bytes: bytes) -> dict:
-    """Busca rostros. Si los hay, analiza el rostro. Si no, analiza la imagen completa."""
-    # Convertir bytes a formato OpenCV
+    """Clasifica entre Análisis Biométrico (Rostros) y Análisis de Objetos/Superficies."""
     nparr = np.frombuffer(imagen_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
     if img is None:
         return {"error": "No se pudo decodificar la imagen."}
 
-    # Convertir a escala de grises para la detección facial
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     rostros = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
     if len(rostros) > 0:
-        # Si hay rostros, recortamos el primero (el principal) para un análisis profundo
+        # MODO 1: Hay personas. Hacemos aislamiento biométrico.
         x, y, w, h = rostros[0]
         rostro_recortado = img[y:y+h, x:x+w]
-        
-        # Volvemos a convertir a bytes para enviarlo a la IA
         _, buffer = cv2.imencode('.jpg', rostro_recortado)
         rostro_bytes = buffer.tobytes()
         
         score_ia = consultar_modelo_hf(rostro_bytes, "IMAGE")
-        return {"rostros_detectados": len(rostros), "analisis_aislado": True, "score_ia": score_ia}
+        return {
+            "modo_analisis": "BIOMÉTRICO",
+            "rostros_detectados": len(rostros), 
+            "score_ia": score_ia
+        }
     else:
-        # Si no hay rostros (paisajes, documentos), analizamos la imagen entera
+        # MODO 2: No hay rostros. Podría ser un producto de Marketplace, paisaje o textura.
         score_ia = consultar_modelo_hf(imagen_bytes, "IMAGE")
-        return {"rostros_detectados": 0, "analisis_aislado": False, "score_ia": score_ia}
+        return {
+            "modo_analisis": "OBJETOS_Y_SUPERFICIES",
+            "rostros_detectados": 0, 
+            "score_ia": score_ia
+        }
 
-def realizar_analisis_forense_metadatos(contenido: bytes, metadatos: dict) -> dict:
+def realizar_analisis_forense_metadatos(contenido: bytes, metadatos: dict, es_captura: bool) -> dict:
     texto_metadatos = str(metadatos).lower()
     texto_binario = contenido.decode('utf-8', errors='ignore').lower()
     
@@ -86,6 +84,13 @@ def realizar_analisis_forense_metadatos(contenido: bytes, metadatos: dict) -> di
                 "nivel_riesgo": "ALTO",
                 "motivo": f"Evidencia de generación o alteración sintética hallada: Firma de '{firma.upper()}'."
             }
+            
+    if es_captura:
+        return {
+            "detectado": False,
+            "nivel_riesgo": "AMBIGUO",
+            "motivo": "Los metadatos han sido purgados (Posible Captura de Pantalla/Red Social). El veredicto dependerá exclusivamente del análisis visual."
+        }
     
     return {
         "detectado": False,
@@ -99,32 +104,35 @@ async def analizar_archivo(file: UploadFile = File(...)):
     nombre_archivo = file.filename.lower()
     hash_sha256 = hashlib.sha256(contenido).hexdigest()
     
+    # 1. DETECCIÓN DE CAPTURAS DE PANTALLA Y REDES SOCIALES
+    palabras_captura = ['screenshot', 'captura', 'whatsapp', 'screen_', 'image-', 'img-']
+    es_captura = any(p in nombre_archivo for p in palabras_captura)
+    
     metadatos_extraidos = {}
     resultado_ia_profundo = None
     tipo_evidencia = "DESCONOCIDO"
 
-    # 1. IMÁGENES (Con Aislamiento Biométrico)
+    if es_captura:
+        metadatos_extraidos["ALERTA_FORENSE"] = "El archivo parece ser una captura de pantalla o descarga de red social. Cadena de custodia de metadatos rota."
+
     if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
         tipo_evidencia = "IMAGEN"
         try:
             img = Image.open(io.BytesIO(contenido))
-            metadatos_extraidos = {f"IMG_{k}": str(v) for k, v in img.info.items() if isinstance(v, (str, bytes))}
+            metadatos_extraidos.update({f"IMG_{k}": str(v) for k, v in img.info.items() if isinstance(v, (str, bytes))})
         except: pass
         
-        # Ejecutamos el motor avanzado
         resultado_ia_profundo = analizar_imagen_aislada(contenido)
 
-    # 2. AUDIO
     elif nombre_archivo.endswith(('.mp3', '.wav')):
         tipo_evidencia = "AUDIO"
         try:
             audio = MutagenFile(io.BytesIO(contenido))
             if audio:
-                metadatos_extraidos = {f"AUDIO_{k}": str(v) for k, v in audio.items()}
+                metadatos_extraidos.update({f"AUDIO_{k}": str(v) for k, v in audio.items()})
         except: pass
-        resultado_ia_profundo = {"score_ia": consultar_modelo_hf(contenido, "AUDIO")}
+        resultado_ia_profundo = {"modo_analisis": "ESPECTROGRAMA", "score_ia": consultar_modelo_hf(contenido, "AUDIO")}
 
-    # 3. VIDEO (Muestreo Temporal de 3 Frames)
     elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
         tipo_evidencia = "VIDEO"
         metadatos_extraidos["info_video"] = "Procesando muestreo temporal (3 frames)."
@@ -136,8 +144,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
         try:
             captura = cv2.VideoCapture(ruta_temp)
             total_frames = int(captura.get(cv2.CAP_PROP_FRAME_COUNT))
-            
-            # Tomamos frames al 25%, 50% y 75% del video
             puntos_extraccion = [int(total_frames * 0.25), int(total_frames * 0.50), int(total_frames * 0.75)]
             analisis_frames = []
             rostros_totales = 0
@@ -153,48 +159,53 @@ async def analizar_archivo(file: UploadFile = File(...)):
 
             captura.release()
             
-            # Consolidamos el resultado del video basado en el peor escenario de los 3 frames
+            # Si al menos un frame tuvo rostros, lo clasificamos como biométrico, sino como objetos.
+            modo_predominante = "BIOMÉTRICO" if rostros_totales > 0 else "OBJETOS_Y_SUPERFICIES"
+            
             resultado_ia_profundo = {
+                "modo_analisis": modo_predominante,
                 "analisis_frames": len(analisis_frames),
                 "rostros_detectados_total": rostros_totales,
-                "score_ia": analisis_frames[1]["score_ia"] if len(analisis_frames) > 1 else None # Tomamos el score del medio como referencia principal
+                "score_ia": analisis_frames[1]["score_ia"] if len(analisis_frames) > 1 else None
             }
-            metadatos_extraidos["video_frames_analizados"] = str(puntos_extraccion)
-            
         except Exception as e:
             metadatos_extraidos["error_video"] = f"Error OpenCV: {str(e)}"
         finally:
             os.remove(ruta_temp)
 
-    # 4. DOCUMENTOS
     elif nombre_archivo.endswith('.pdf'):
         tipo_evidencia = "DOCUMENTO"
         try:
             reader = PdfReader(io.BytesIO(contenido))
-            metadatos_extraidos = {f"PDF_{k.replace('/', '')}": str(v) for k, v in reader.metadata.items()}
+            metadatos_extraidos.update({f"PDF_{k.replace('/', '')}": str(v) for k, v in reader.metadata.items()})
         except: pass
 
     # --- RESOLUCIÓN FINAL E HÍBRIDA ---
-    resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos)
+    resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos, es_captura)
     
-    # Ajustar el nivel de riesgo si la IA encontró alta probabilidad de que sea artificial
-    # Hugging face suele devolver [{'label': 'artificial', 'score': 0.98}, ...]
-    if resultado_ia_profundo and "score_ia" in resultado_ia_profundo:
+    # Evaluación contundente de la IA visual (incluso si los metadatos estaban limpios)
+    if resultado_ia_profundo and "score_ia" in resultado_ia_profundo and resultado_ia_profundo["score_ia"]:
         score_data = resultado_ia_profundo["score_ia"]
         if isinstance(score_data, dict) and "label" in score_data:
             etiqueta = str(score_data.get("label", "")).lower()
             confianza = float(score_data.get("score", 0.0))
             
-            # Si el modelo HF dice que es IA (fake/artificial) con más del 70% de confianza
-            if ("fake" in etiqueta or "artificial" in etiqueta) and confianza > 0.70:
+            if ("fake" in etiqueta or "artificial" in etiqueta) and confianza > 0.65:
                 resultado_estructural["detectado"] = True
                 resultado_estructural["nivel_riesgo"] = "ALTO"
-                resultado_estructural["motivo"] = f"La Red Neuronal detectó anomalías visuales ({int(confianza*100)}% certeza). Posible manipulación o Deepfake."
+                
+                # Explicación adaptada al caso de uso (Rostro vs Objeto)
+                modo = resultado_ia_profundo.get("modo_analisis", "")
+                if modo == "OBJETOS_Y_SUPERFICIES":
+                    resultado_estructural["motivo"] = f"Riesgo de Inpainting o generación sintética de entorno/producto ({int(confianza*100)}% certeza visual)."
+                else:
+                    resultado_estructural["motivo"] = f"La Red Neuronal detectó anomalías visuales ({int(confianza*100)}% certeza). Posible manipulación."
 
     return {
         "nombre_archivo": file.filename,
         "hash_sha256": hash_sha256,
         "tipo_evidencia": tipo_evidencia,
+        "es_captura": es_captura,
         "analisis": resultado_estructural,
         "detalles_biometricos": resultado_ia_profundo,
         "detalles_tecnicos": metadatos_extraidos
