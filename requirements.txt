@@ -5,3 +5,5 @@ pillow
 pypdf
 python-docx
 requests
+mutagen      # Para metadatos de audio (MP3, WAV)
+ffmpeg-python # Para extraer información de video
