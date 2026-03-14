@@ -6,3 +6,4 @@ pypdf
 python-docx
 mutagen
 requests
+opencv-python-headless
