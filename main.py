@@ -12,7 +12,7 @@ app = FastAPI()
 # --- CONFIGURACIÓN DE HUGGING FACE (Segura) ---
 # Ahora lee la variable secreta desde el servidor de Render
 TOKEN_HF = os.environ.get("HUGGINGFACE_TOKEN") 
-API_URL = "https://api-inference.huggingface.co/models/dima806/ai_vs_real_image_detection"
+API_URL = "https://api-inference.huggingface.co/models/Nahrawy/AI-Generated-Image-Detection"
 headers = {"Authorization": f"Bearer {TOKEN_HF}"}
 
 
@@ -76,7 +76,8 @@ def evaluar_presencia_ia(metadatos: dict, contenido_crudo: bytes, es_imagen: boo
                     "detectado": False,
                     "nivel_riesgo": "ERROR",
                     "metodo": f"Fallo API (HTTP {response.status_code})",
-                    "motivo": f"Respuesta de Hugging Face: {response.text}"
+                    # AQUÍ ESTÁ EL TRUCO: Le pedimos que nos imprima a qué URL intentó ir
+                    "motivo": f"Intentó ir a: {API_URL} y falló. Respuesta: {response.text}"
                 }
         except Exception as e:
             return {
