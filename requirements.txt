@@ -7,3 +7,4 @@ python-docx
 mutagen
 requests
 opencv-python-headless
+numpy
