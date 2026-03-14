@@ -10,27 +10,35 @@ import requests
 
 app = FastAPI()
 
-# Configuración de Hugging Face (Asegúrate de poner tu Token en Render -> Environment Variables)
+# Token de Hugging Face (Configurado en Variables de Entorno de Render)
 HF_TOKEN = os.getenv("HF_TOKEN")
-# Modelo sugerido para detección de imágenes IA
-MODEL_URL = "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector"
 
+# Modelos específicos por tipo de evidencia
+MODELS = {
+    "IMAGE": "umm-maybe/AI-image-detector",
+    "AUDIO": "ResembleAI/ai_detector_audio"
+}
+
+# Diccionario de firmas de IA
 FIRMAS_IA = [
     "midjourney", "dall-e", "dall·e", "stable diffusion", 
     "adobe firefly", "generative fill", "ai generated", 
     "comfyui", "bing", "microsoft", "metadata", "canva",
-    "photoshop", "gimp", "diffusion", "krea", "elevenlabs"
+    "photoshop", "gimp", "diffusion", "krea", "elevenlabs", "vall-e"
 ]
 
-def consultar_modelo_hf(contenido_archivo: bytes):
-    if not HF_TOKEN:
+def consultar_modelo_hf(contenido_archivo: bytes, tipo: str):
+    if not HF_TOKEN or tipo not in MODELS:
         return None
+    
+    url = f"https://api-inference.huggingface.co/models/{MODELS[tipo]}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    
     try:
-        response = requests.post(MODEL_URL, headers=headers, data=contenido_archivo)
+        response = requests.post(url, headers=headers, data=contenido_archivo)
         return response.json()
-    except:
-        return None
+    except Exception as e:
+        return {"error": str(e)}
 
 def realizar_analisis_forense(contenido: bytes, metadatos: dict) -> dict:
     texto_metadatos = str(metadatos).lower()
@@ -56,9 +64,11 @@ async def analizar_archivo(file: UploadFile = File(...)):
     nombre_archivo = file.filename.lower()
     hash_sha256 = hashlib.sha256(contenido).hexdigest()
     metadatos_extraidos = {}
+    tipo_evidencia = None
 
     # 1. IMÁGENES
     if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
+        tipo_evidencia = "IMAGE"
         try:
             img = Image.open(io.BytesIO(contenido))
             metadatos_extraidos = {f"IMG_{k}": str(v) for k, v in img.info.items() if isinstance(v, (str, bytes))}
@@ -80,22 +90,22 @@ async def analizar_archivo(file: UploadFile = File(...)):
 
     # 4. AUDIO (MP3, WAV)
     elif nombre_archivo.endswith(('.mp3', '.wav')):
+        tipo_evidencia = "AUDIO"
         try:
             audio = MutagenFile(io.BytesIO(contenido))
             if audio:
                 metadatos_extraidos = {f"AUDIO_{k}": str(v) for k, v in audio.items()}
         except: pass
 
-    # 5. VIDEO (Metadatos básicos por extensión)
+    # 5. VIDEO
     elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
-        metadatos_extraidos = {"info": "Archivo de video detectado", "analisis": "Requiere peritaje de frames"}
+        metadatos_extraidos = {"info": "Archivo de video detectado", "analisis": "Requiere peritaje profundo de frames."}
 
+    # Análisis por Metadatos
     resultado_forense = realizar_analisis_forense(contenido, metadatos_extraidos)
     
-    # Inferencia opcional si es imagen
-    score_ia = None
-    if nombre_archivo.endswith(('.png', '.jpg', '.jpeg')):
-        score_ia = consultar_modelo_hf(contenido)
+    # Análisis por IA (Hugging Face)
+    score_ia = consultar_modelo_hf(contenido, tipo_evidencia) if tipo_evidencia else None
 
     return {
         "nombre_archivo": file.filename,
