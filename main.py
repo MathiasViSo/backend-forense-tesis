@@ -15,11 +15,13 @@ import gc
 
 app = FastAPI()
 
+# Configuración de Entorno
 HF_TOKEN = os.getenv("HF_TOKEN")
-# Volvemos al modelo original que es más ligero para la capa gratuita
+
+# Modelos actualizados y estables
 MODELS = {
-    "IMAGE": "umm-maybe/AI-image-detector", 
-    "AUDIO": "ResembleAI/ai_detector_audio"
+    "IMAGE": "Organika/sdxl-detector", 
+    "AUDIO": "facebook/wav2vec2-base-960h"
 }
 
 FIRMAS_IA = [
@@ -32,7 +34,7 @@ face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fronta
 
 def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos=3):
     if not HF_TOKEN or tipo not in MODELS:
-        return {"error": "Token de Hugging Face no configurado."}
+        return {"error": "Credenciales de IA no configuradas en el servidor."}
     
     url = f"https://api-inference.huggingface.co/models/{MODELS[tipo]}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
@@ -41,29 +43,23 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos=3):
         try:
             response = requests.post(url, headers=headers, data=contenido_bytes)
             
-            # --- EL ESCUDO ANTI-CRASH ---
-            # Si Hugging Face nos manda una página de error HTML en vez de datos
+            # Escudo contra errores de servidor (HTML o saturación)
             if response.status_code != 200:
-                print(f"[{tipo}] Error HTTP {response.status_code}: {response.text}")
-                # Si es error 503, el servidor está saturado/cargando. Esperamos y reintentamos.
                 if response.status_code == 503:
-                    print("El servidor de IA está saturado. Esperando 10 segundos...")
+                    print(f"[{tipo}] Modelo cargando. Reintentando en 10s...")
                     time.sleep(10)
                     continue
-                return {"error": f"Hugging Face rechazó la conexión (Código {response.status_code})."}
+                return {"error": f"Error del servidor neuronal (Código {response.status_code})"}
             
-            # Solo si la respuesta es un 200 OK, intentamos leer el JSON
             resultado = response.json()
             
+            # Manejo de tiempo de espera estimado
             if isinstance(resultado, dict) and "estimated_time" in resultado:
-                tiempo_espera = resultado["estimated_time"]
-                print(f"[{tipo}] Modelo durmiendo. Esperando {tiempo_espera}s (Intento {intento+1})...")
-                time.sleep(tiempo_espera + 2)
+                t = resultado["estimated_time"]
+                print(f"[{tipo}] Durmiendo. Esperando {t}s...")
+                time.sleep(t + 2)
                 continue
             
-            if isinstance(resultado, dict) and "error" in resultado:
-                return {"error": resultado["error"]}
-                
             if isinstance(resultado, list):
                 if len(resultado) > 0 and isinstance(resultado[0], list):
                     return resultado[0]
@@ -71,12 +67,10 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos=3):
                 
             return resultado
         except Exception as e:
-            # Si ocurre cualquier otro fallo (como un corte de internet)
-            return {"error": f"Fallo interno del servidor pericial: {str(e)}"}
+            return {"error": f"Fallo de conexión pericial: {str(e)}"}
             
-    return {"error": "El servidor de IA no respondió a tiempo después de 3 intentos."}
+    return {"error": "Tiempo de espera de IA agotado."}
 
-# --- MOTOR FORENSE ELA ---
 def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
     try:
         imagen_original = Image.open(io.BytesIO(contenido_imagen)).convert('RGB')
@@ -113,12 +107,10 @@ def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90
 def analizar_imagen_aislada(imagen_bytes: bytes) -> dict:
     nparr = np.frombuffer(imagen_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    if img is None:
-        return {"error": "No se pudo decodificar la imagen."}
+    if img is None: return {"error": "Error de decodificación."}
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    rostros = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    rostros = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(30, 30))
 
     if len(rostros) > 0:
         x, y, w, h = rostros[0]
@@ -133,14 +125,11 @@ def analizar_imagen_aislada(imagen_bytes: bytes) -> dict:
 def realizar_analisis_forense_metadatos(contenido: bytes, metadatos: dict, es_captura: bool) -> dict:
     texto_metadatos = str(metadatos).lower()
     texto_binario = contenido.decode('utf-8', errors='ignore').lower()
-    
     for firma in FIRMAS_IA:
         if firma in texto_metadatos or firma in texto_binario:
-            return {"detectado": True, "nivel_riesgo": "ALTO", "motivo": f"Firma oculta de '{firma.upper()}' detectada."}
-            
+            return {"detectado": True, "nivel_riesgo": "ALTO", "motivo": f"Firma de '{firma.upper()}' detectada."}
     if es_captura:
-        return {"detectado": False, "nivel_riesgo": "PREVENTIVO", "motivo": "Metadatos purgados (Posible Captura/WhatsApp)."}
-    
+        return {"detectado": False, "nivel_riesgo": "PREVENTIVO", "motivo": "Metadatos purgados (Captura/WhatsApp)."}
     return {"detectado": False, "nivel_riesgo": "BAJO", "motivo": "Sin firmas conocidas."}
 
 @app.post("/analizar")
@@ -149,8 +138,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
     nombre_archivo = file.filename.lower()
     hash_sha256 = hashlib.sha256(contenido).hexdigest()
     
-    palabras_captura = ['screenshot', 'captura', 'whatsapp', 'screen_', 'image-', 'img-']
-    es_captura = any(p in nombre_archivo for p in palabras_captura)
+    es_captura = any(p in nombre_archivo for p in ['screenshot', 'captura', 'whatsapp', 'screen_', 'image-', 'img-'])
     
     metadatos_extraidos = {}
     resultado_ia_profundo = None
@@ -160,10 +148,12 @@ async def analizar_archivo(file: UploadFile = File(...)):
     if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
         tipo_evidencia = "IMAGEN"
         try:
+            # 1. ELA se ejecuta sobre el contenido original
             resultado_ela = aplicar_analisis_ela(contenido)
             if resultado_ela and resultado_ela.get("ela_ejecutado"):
                 metadatos_extraidos["analisis_ela_matematico"] = resultado_ela
 
+            # 2. Procesamiento optimizado
             img = Image.open(io.BytesIO(contenido)).convert('RGB')
             metadatos_extraidos.update({f"IMG_{k}": str(v) for k, v in img.info.items() if isinstance(v, (str, bytes))})
             
@@ -175,17 +165,9 @@ async def analizar_archivo(file: UploadFile = File(...)):
             resultado_ia_profundo = analizar_imagen_aislada(contenido_optimo)
             del img, buffer_optimo
             gc.collect() 
+        except Exception as e: print(f"Error: {e}")
 
-        except Exception as e: 
-            print(f"Error procesando imagen: {e}")
-
-    elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
-        tipo_evidencia = "VIDEO"
-        metadatos_extraidos["info_video"] = "Muestreo temporal de frames."
-        # ... (Mantén tu lógica de video aquí si la necesitas, simplificada para el ejemplo)
-        resultado_ia_profundo = {"modo_analisis": "VIDEO_FRAMES", "score_ia": []}
-
-    # --- EXTRACCIÓN DEL PORCENTAJE EXACTO DE IA ---
+    # --- LÓGICA UNIVERSAL DE PORCENTAJE ---
     resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos, es_captura)
     porcentaje_ia = 0.0
     error_ia = None
@@ -193,36 +175,37 @@ async def analizar_archivo(file: UploadFile = File(...)):
     if tipo_evidencia == "IMAGEN" and resultado_ia_profundo:
         score_data = resultado_ia_profundo.get("score_ia")
         
-        # Buscamos en TODA la lista la etiqueta de falsificación
-        if isinstance(score_data, list):
-            for item in score_data:
-                lbl = str(item.get("label", "")).lower()
-                val = float(item.get("score", 0.0))
-                if any(x in lbl for x in ["fake", "artificial", "generated", "ai"]):
-                    porcentaje_ia = val * 100
-                    break
+        if isinstance(score_data, list) and len(score_data) > 0:
+            # Ordenar por el score más alto
+            score_data = sorted(score_data, key=lambda x: float(x.get("score", 0.0)), reverse=True)
+            top_label = str(score_data[0].get("label", "")).lower()
+            top_score = float(score_data[0].get("score", 0.0))
+            
+            # Cálculo de probabilidad inversa (Detección humana vs artificial)
+            if any(x in top_label for x in ["human", "real", "genuine"]):
+                porcentaje_ia = (1.0 - top_score) * 100
+            else:
+                porcentaje_ia = top_score * 100
+                
         elif isinstance(score_data, dict) and "error" in score_data:
             error_ia = score_data["error"]
 
         anomalia_ela = resultado_ela.get("anomalia_detectada_ela", False) if resultado_ela else False
-
-        # Inyectamos el porcentaje en la respuesta
         resultado_estructural["porcentaje_ia"] = round(porcentaje_ia, 2)
 
         if error_ia:
             resultado_estructural["nivel_riesgo"] = "AMBIGUO"
-            resultado_estructural["motivo"] = f"Error de IA: {error_ia}. ELA Anomalía: {anomalia_ela}"
+            resultado_estructural["motivo"] = f"Fallo de conexión neuronal: {error_ia}"
         else:
-            # Determinamos el nivel de riesgo en base al porcentaje
-            if porcentaje_ia > 65.0:
+            if porcentaje_ia > 60.0:
                 resultado_estructural["nivel_riesgo"] = "ALTO"
-                resultado_estructural["motivo"] = "Análisis visual detecta alta probabilidad de manipulación o síntesis."
-            elif porcentaje_ia > 15.0 or anomalia_ela:
+                resultado_estructural["motivo"] = "Análisis visual detecta alta probabilidad de origen sintético."
+            elif porcentaje_ia > 20.0 or anomalia_ela:
                 resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
-                resultado_estructural["motivo"] = "Se detectan trazas de IA o alteraciones de compresión (ELA). Requiere revisión."
+                resultado_estructural["motivo"] = "Se detectan trazas de IA o manipulación de píxeles (ELA)."
             else:
                 resultado_estructural["nivel_riesgo"] = "BAJO"
-                resultado_estructural["motivo"] = "Alta probabilidad de origen humano/cámara."
+                resultado_estructural["motivo"] = "Probabilidad dominante de origen natural/cámara."
 
     return {
         "nombre_archivo": file.filename,
