@@ -16,6 +16,7 @@ import gc
 app = FastAPI()
 
 HF_TOKEN = os.getenv("HF_TOKEN")
+# Volvemos al modelo original que es más ligero para la capa gratuita
 MODELS = {
     "IMAGE": "umm-maybe/AI-image-detector", 
     "AUDIO": "ResembleAI/ai_detector_audio"
@@ -39,29 +40,41 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos=3):
     for intento in range(max_intentos):
         try:
             response = requests.post(url, headers=headers, data=contenido_bytes)
+            
+            # --- EL ESCUDO ANTI-CRASH ---
+            # Si Hugging Face nos manda una página de error HTML en vez de datos
+            if response.status_code != 200:
+                print(f"[{tipo}] Error HTTP {response.status_code}: {response.text}")
+                # Si es error 503, el servidor está saturado/cargando. Esperamos y reintentamos.
+                if response.status_code == 503:
+                    print("El servidor de IA está saturado. Esperando 10 segundos...")
+                    time.sleep(10)
+                    continue
+                return {"error": f"Hugging Face rechazó la conexión (Código {response.status_code})."}
+            
+            # Solo si la respuesta es un 200 OK, intentamos leer el JSON
             resultado = response.json()
             
             if isinstance(resultado, dict) and "estimated_time" in resultado:
                 tiempo_espera = resultado["estimated_time"]
-                print(f"[{tipo}] Modelo durmiendo. Esperando {tiempo_espera}s...")
+                print(f"[{tipo}] Modelo durmiendo. Esperando {tiempo_espera}s (Intento {intento+1})...")
                 time.sleep(tiempo_espera + 2)
                 continue
             
             if isinstance(resultado, dict) and "error" in resultado:
                 return {"error": resultado["error"]}
                 
-            # Corrección vital: Devolver la lista completa para buscar el porcentaje exacto
             if isinstance(resultado, list):
-                # HuggingFace a veces anida las listas [[{...}, {...}]]
                 if len(resultado) > 0 and isinstance(resultado[0], list):
                     return resultado[0]
                 return resultado
                 
             return resultado
         except Exception as e:
-            return {"error": f"Fallo de conexión: {str(e)}"}
+            # Si ocurre cualquier otro fallo (como un corte de internet)
+            return {"error": f"Fallo interno del servidor pericial: {str(e)}"}
             
-    return {"error": "El servidor de IA no respondió a tiempo."}
+    return {"error": "El servidor de IA no respondió a tiempo después de 3 intentos."}
 
 # --- MOTOR FORENSE ELA ---
 def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
