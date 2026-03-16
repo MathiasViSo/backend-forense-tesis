@@ -10,6 +10,8 @@ import cv2
 import numpy as np
 import tempfile
 import base64
+import time
+import gc
 
 app = FastAPI()
 
@@ -27,19 +29,32 @@ FIRMAS_IA = [
 
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-def consultar_modelo_hf(contenido_bytes: bytes, tipo: str):
+def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos=3):
     if not HF_TOKEN or tipo not in MODELS:
         return None
     url = f"https://api-inference.huggingface.co/models/{MODELS[tipo]}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    try:
-        response = requests.post(url, headers=headers, data=contenido_bytes)
-        resultado = response.json()
-        if isinstance(resultado, list) and len(resultado) > 0:
-            return resultado[0] 
-        return resultado
-    except Exception as e:
-        return {"error": str(e)}
+    
+    for intento in range(max_intentos):
+        try:
+            response = requests.post(url, headers=headers, data=contenido_bytes)
+            resultado = response.json()
+            
+            # Si el modelo de Hugging Face está durmiendo, nos pedirá esperar
+            if isinstance(resultado, dict) and "estimated_time" in resultado:
+                tiempo_espera = resultado["estimated_time"]
+                print(f"[{tipo}] Modelo durmiendo. Esperando {tiempo_espera}s (Intento {intento+1}/{max_intentos})")
+                time.sleep(tiempo_espera + 2) # Esperamos y volvemos a intentar el bucle
+                continue
+                
+            if isinstance(resultado, list) and len(resultado) > 0:
+                return resultado[0] 
+            return resultado
+        except Exception as e:
+            print(f"Error en API de IA: {e}")
+            return {"error": str(e)}
+            
+    return {"error": "El modelo de IA tardó demasiado en despertar. Intenta de nuevo."}
 
 # --- MOTOR FORENSE: ELA CON GENERACIÓN DE MAPA DE CALOR ---
 def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
@@ -153,15 +168,32 @@ async def analizar_archivo(file: UploadFile = File(...)):
     if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
         tipo_evidencia = "IMAGEN"
         try:
-            img = Image.open(io.BytesIO(contenido))
+            # 1. OPTIMIZACIÓN DE MEMORIA (EVITA EL ERROR 502 EN RENDER)
+            img = Image.open(io.BytesIO(contenido)).convert('RGB')
+            
+            # Extraemos metadatos ANTES de modificar la imagen
             metadatos_extraidos.update({f"IMG_{k}": str(v) for k, v in img.info.items() if isinstance(v, (str, bytes))})
-        except: pass
-        
-        resultado_ia_profundo = analizar_imagen_aislada(contenido)
-        resultado_ela = aplicar_analisis_ela(contenido)
-        
-        if resultado_ela and resultado_ela.get("ela_ejecutado"):
-            metadatos_extraidos["analisis_ela_matematico"] = resultado_ela
+            
+            img.thumbnail((800, 800)) # Achicamos la imagen proporcionalmente para no saturar la RAM
+            
+            buffer_optimo = io.BytesIO()
+            img.save(buffer_optimo, format="JPEG", quality=95)
+            contenido_optimo = buffer_optimo.getvalue()
+            
+            # 2. Analizamos con la versión ligera
+            resultado_ia_profundo = analizar_imagen_aislada(contenido_optimo)
+            resultado_ela = aplicar_analisis_ela(contenido_optimo)
+            
+            if resultado_ela and resultado_ela.get("ela_ejecutado"):
+                metadatos_extraidos["analisis_ela_matematico"] = resultado_ela
+                
+            # 3. Limpieza estricta de RAM
+            del img
+            del buffer_optimo
+            gc.collect() 
+
+        except Exception as e: 
+            print(f"Error procesando imagen: {e}")
 
     elif nombre_archivo.endswith(('.mp3', '.wav')):
         tipo_evidencia = "AUDIO"
@@ -191,7 +223,9 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 captura.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 exito, frame = captura.read()
                 if exito:
-                    _, buffer = cv2.imencode('.jpg', frame)
+                    # Optimizamos también los frames de video
+                    frame_achicado = cv2.resize(frame, (800, int(800 * frame.shape[0] / frame.shape[1])))
+                    _, buffer = cv2.imencode('.jpg', frame_achicado)
                     resultado_frame = analizar_imagen_aislada(buffer.tobytes())
                     analisis_frames.append(resultado_frame)
                     rostros_totales += resultado_frame.get("rostros_detectados", 0)
@@ -205,6 +239,9 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 "rostros_detectados_total": rostros_totales,
                 "score_ia": analisis_frames[1]["score_ia"] if len(analisis_frames) > 1 else None
             }
+            
+            gc.collect() # Limpieza de RAM después de procesar video
+            
         except Exception as e:
             metadatos_extraidos["error_video"] = f"Error OpenCV: {str(e)}"
         finally:
