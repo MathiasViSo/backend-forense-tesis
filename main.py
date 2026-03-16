@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile
 import hashlib
-from PIL import Image
+from PIL import Image, ImageChops, ImageEnhance
 from pypdf import PdfReader
 from mutagen import File as MutagenFile
 import io
@@ -9,6 +9,7 @@ import requests
 import cv2
 import numpy as np
 import tempfile
+import base64
 
 app = FastAPI()
 
@@ -40,8 +41,44 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str):
     except Exception as e:
         return {"error": str(e)}
 
+# --- MOTOR FORENSE: ELA CON GENERACIÓN DE MAPA DE CALOR ---
+def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
+    """Detecta parches midiendo la compresión y devuelve el mapa de calor visual."""
+    try:
+        imagen_original = Image.open(io.BytesIO(contenido_imagen)).convert('RGB')
+        
+        buffer_temporal = io.BytesIO()
+        imagen_original.save(buffer_temporal, 'JPEG', quality=calidad_recompresion)
+        buffer_temporal.seek(0)
+        imagen_recomprimida = Image.open(buffer_temporal)
+        
+        diferencia_ela = ImageChops.difference(imagen_original, imagen_recomprimida)
+        ela_array = np.array(diferencia_ela)
+        
+        desviacion_ruido = float(np.std(ela_array))
+        sospecha_manipulacion = desviacion_ruido > 15.0 
+        
+        # Mapa de Calor: Exageramos el brillo del ruido para la Lupa Forense
+        extremos = diferencia_ela.getextrema()
+        max_diff = max([ex[1] for ex in extremos])
+        if max_diff == 0: max_diff = 1
+        escala_brillo = 255.0 / max_diff
+        imagen_ela_resaltada = ImageEnhance.Brightness(diferencia_ela).enhance(escala_brillo)
+        
+        buffer_salida = io.BytesIO()
+        imagen_ela_resaltada.save(buffer_salida, format="JPEG")
+        mapa_calor_b64 = base64.b64encode(buffer_salida.getvalue()).decode("utf-8")
+        
+        return {
+            "ela_ejecutado": True,
+            "desviacion_estandar_ruido": round(desviacion_ruido, 2),
+            "anomalia_detectada_ela": sospecha_manipulacion,
+            "mapa_calor_base64": mapa_calor_b64
+        }
+    except Exception as e:
+        return {"ela_ejecutado": False, "error_ela": str(e)}
+
 def analizar_imagen_aislada(imagen_bytes: bytes) -> dict:
-    """Clasifica entre Análisis Biométrico (Rostros) y Análisis de Objetos/Superficies."""
     nparr = np.frombuffer(imagen_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
@@ -52,7 +89,6 @@ def analizar_imagen_aislada(imagen_bytes: bytes) -> dict:
     rostros = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
     if len(rostros) > 0:
-        # MODO 1: Hay personas. Hacemos aislamiento biométrico.
         x, y, w, h = rostros[0]
         rostro_recortado = img[y:y+h, x:x+w]
         _, buffer = cv2.imencode('.jpg', rostro_recortado)
@@ -65,7 +101,6 @@ def analizar_imagen_aislada(imagen_bytes: bytes) -> dict:
             "score_ia": score_ia
         }
     else:
-        # MODO 2: No hay rostros. Podría ser un producto de Marketplace, paisaje o textura.
         score_ia = consultar_modelo_hf(imagen_bytes, "IMAGE")
         return {
             "modo_analisis": "OBJETOS_Y_SUPERFICIES",
@@ -82,14 +117,14 @@ def realizar_analisis_forense_metadatos(contenido: bytes, metadatos: dict, es_ca
             return {
                 "detectado": True,
                 "nivel_riesgo": "ALTO",
-                "motivo": f"Evidencia de generación o alteración sintética hallada: Firma de '{firma.upper()}'."
+                "motivo": f"Evidencia de generación sintética hallada: Firma oculta de '{firma.upper()}'."
             }
             
     if es_captura:
         return {
             "detectado": False,
-            "nivel_riesgo": "AMBIGUO",
-            "motivo": "Los metadatos han sido purgados (Posible Captura de Pantalla/Red Social). El veredicto dependerá exclusivamente del análisis visual."
+            "nivel_riesgo": "PREVENTIVO", 
+            "motivo": "Metadatos purgados (Posible Captura de Pantalla/WhatsApp)."
         }
     
     return {
@@ -104,16 +139,16 @@ async def analizar_archivo(file: UploadFile = File(...)):
     nombre_archivo = file.filename.lower()
     hash_sha256 = hashlib.sha256(contenido).hexdigest()
     
-    # 1. DETECCIÓN DE CAPTURAS DE PANTALLA Y REDES SOCIALES
     palabras_captura = ['screenshot', 'captura', 'whatsapp', 'screen_', 'image-', 'img-']
     es_captura = any(p in nombre_archivo for p in palabras_captura)
     
     metadatos_extraidos = {}
     resultado_ia_profundo = None
+    resultado_ela = None
     tipo_evidencia = "DESCONOCIDO"
 
     if es_captura:
-        metadatos_extraidos["ALERTA_FORENSE"] = "El archivo parece ser una captura de pantalla o descarga de red social. Cadena de custodia de metadatos rota."
+        metadatos_extraidos["ALERTA_FORENSE"] = "Archivo procesado por red social o captura. Cadena de custodia de metadatos rota."
 
     if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
         tipo_evidencia = "IMAGEN"
@@ -123,6 +158,10 @@ async def analizar_archivo(file: UploadFile = File(...)):
         except: pass
         
         resultado_ia_profundo = analizar_imagen_aislada(contenido)
+        resultado_ela = aplicar_analisis_ela(contenido)
+        
+        if resultado_ela and resultado_ela.get("ela_ejecutado"):
+            metadatos_extraidos["analisis_ela_matematico"] = resultado_ela
 
     elif nombre_archivo.endswith(('.mp3', '.wav')):
         tipo_evidencia = "AUDIO"
@@ -159,9 +198,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
 
             captura.release()
             
-            # Si al menos un frame tuvo rostros, lo clasificamos como biométrico, sino como objetos.
             modo_predominante = "BIOMÉTRICO" if rostros_totales > 0 else "OBJETOS_Y_SUPERFICIES"
-            
             resultado_ia_profundo = {
                 "modo_analisis": modo_predominante,
                 "analisis_frames": len(analisis_frames),
@@ -180,26 +217,35 @@ async def analizar_archivo(file: UploadFile = File(...)):
             metadatos_extraidos.update({f"PDF_{k.replace('/', '')}": str(v) for k, v in reader.metadata.items()})
         except: pass
 
-    # --- RESOLUCIÓN FINAL E HÍBRIDA ---
+    # --- LÓGICA DE CERTEZA HÍBRIDA ---
     resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos, es_captura)
     
-    # Evaluación contundente de la IA visual (incluso si los metadatos estaban limpios)
-    if resultado_ia_profundo and "score_ia" in resultado_ia_profundo and resultado_ia_profundo["score_ia"]:
-        score_data = resultado_ia_profundo["score_ia"]
+    if tipo_evidencia == "IMAGEN" and resultado_ia_profundo:
+        score_data = resultado_ia_profundo.get("score_ia")
+        confianza_visual = 0.0
+        etiqueta_visual = ""
+        
         if isinstance(score_data, dict) and "label" in score_data:
-            etiqueta = str(score_data.get("label", "")).lower()
-            confianza = float(score_data.get("score", 0.0))
+            confianza_visual = float(score_data.get("score", 0.0))
+            etiqueta_visual = str(score_data.get("label", "")).lower()
             
-            if ("fake" in etiqueta or "artificial" in etiqueta) and confianza > 0.65:
-                resultado_estructural["detectado"] = True
+        anomalia_ela = False
+        if resultado_ela and resultado_ela.get("ela_ejecutado"):
+            anomalia_ela = resultado_ela.get("anomalia_detectada_ela", False)
+
+        es_ia_visual_alta = ("fake" in etiqueta_visual or "artificial" in etiqueta_visual) and confianza_visual > 0.85
+
+        if es_ia_visual_alta:
+            if anomalia_ela:
                 resultado_estructural["nivel_riesgo"] = "ALTO"
+                resultado_estructural["motivo"] = f"Alta probabilidad de manipulación ({int(confianza_visual*100)}%). El análisis matemático confirma compresión anómala."
+            else:
+                resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
+                resultado_estructural["motivo"] = f"La IA visual detectó anomalías ({int(confianza_visual*100)}%), pero el análisis ELA matemático confirma que la compresión es natural. Posible filtro o foto de cámara."
                 
-                # Explicación adaptada al caso de uso (Rostro vs Objeto)
-                modo = resultado_ia_profundo.get("modo_analisis", "")
-                if modo == "OBJETOS_Y_SUPERFICIES":
-                    resultado_estructural["motivo"] = f"Riesgo de Inpainting o generación sintética de entorno/producto ({int(confianza*100)}% certeza visual)."
-                else:
-                    resultado_estructural["motivo"] = f"La Red Neuronal detectó anomalías visuales ({int(confianza*100)}% certeza). Posible manipulación."
+        elif anomalia_ela:
+            resultado_estructural["nivel_riesgo"] = "ALTO"
+            resultado_estructural["motivo"] = "El análisis visual no es concluyente, pero el motor matemático ELA descubrió parches o texturas insertadas asimétricamente."
 
     return {
         "nombre_archivo": file.filename,
