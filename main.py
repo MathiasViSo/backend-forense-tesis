@@ -31,7 +31,8 @@ face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fronta
 
 def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos=3):
     if not HF_TOKEN or tipo not in MODELS:
-        return None
+        return {"error": "Token de Hugging Face no configurado o modelo no válido."}
+    
     url = f"https://api-inference.huggingface.co/models/{MODELS[tipo]}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     
@@ -40,26 +41,30 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos=3):
             response = requests.post(url, headers=headers, data=contenido_bytes)
             resultado = response.json()
             
-            # Si el modelo de Hugging Face está durmiendo, nos pedirá esperar
+            # Manejo del modelo "durmiendo"
             if isinstance(resultado, dict) and "estimated_time" in resultado:
                 tiempo_espera = resultado["estimated_time"]
                 print(f"[{tipo}] Modelo durmiendo. Esperando {tiempo_espera}s (Intento {intento+1}/{max_intentos})")
-                time.sleep(tiempo_espera + 2) # Esperamos y volvemos a intentar el bucle
+                time.sleep(tiempo_espera + 2)
                 continue
+            
+            # Manejo de errores de cuota o caídas de API
+            if isinstance(resultado, dict) and "error" in resultado:
+                return {"error": resultado["error"]}
                 
             if isinstance(resultado, list) and len(resultado) > 0:
                 return resultado[0] 
+                
             return resultado
         except Exception as e:
-            print(f"Error en API de IA: {e}")
-            return {"error": str(e)}
+            return {"error": f"Fallo de conexión: {str(e)}"}
             
-    return {"error": "El modelo de IA tardó demasiado en despertar. Intenta de nuevo."}
+    return {"error": "El servidor de IA no respondió a tiempo."}
 
 # --- MOTOR FORENSE: ELA CON GENERACIÓN DE MAPA DE CALOR ---
 def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
-    """Detecta parches midiendo la compresión y devuelve el mapa de calor visual."""
     try:
+        # El ELA se DEBE ejecutar sobre el byte crudo original, sin manipular
         imagen_original = Image.open(io.BytesIO(contenido_imagen)).convert('RGB')
         
         buffer_temporal = io.BytesIO()
@@ -71,9 +76,9 @@ def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90
         ela_array = np.array(diferencia_ela)
         
         desviacion_ruido = float(np.std(ela_array))
-        sospecha_manipulacion = desviacion_ruido > 15.0 
+        # Umbral bajado ligeramente a 12 para mayor sensibilidad en inpainting
+        sospecha_manipulacion = desviacion_ruido > 12.0 
         
-        # Mapa de Calor: Exageramos el brillo del ruido para la Lupa Forense
         extremos = diferencia_ela.getextrema()
         max_diff = max([ex[1] for ex in extremos])
         if max_diff == 0: max_diff = 1
@@ -168,26 +173,24 @@ async def analizar_archivo(file: UploadFile = File(...)):
     if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
         tipo_evidencia = "IMAGEN"
         try:
-            # 1. OPTIMIZACIÓN DE MEMORIA (EVITA EL ERROR 502 EN RENDER)
+            # 1. ELA SE EJECUTA PRIMERO SOBRE EL ARCHIVO CRUDO (Preserva la evidencia)
+            resultado_ela = aplicar_analisis_ela(contenido)
+            if resultado_ela and resultado_ela.get("ela_ejecutado"):
+                metadatos_extraidos["analisis_ela_matematico"] = resultado_ela
+
+            # 2. OPTIMIZACIÓN DE MEMORIA (Solo para OpenCV y Hugging Face)
             img = Image.open(io.BytesIO(contenido)).convert('RGB')
-            
-            # Extraemos metadatos ANTES de modificar la imagen
             metadatos_extraidos.update({f"IMG_{k}": str(v) for k, v in img.info.items() if isinstance(v, (str, bytes))})
             
-            img.thumbnail((800, 800)) # Achicamos la imagen proporcionalmente para no saturar la RAM
-            
+            img.thumbnail((800, 800)) 
             buffer_optimo = io.BytesIO()
             img.save(buffer_optimo, format="JPEG", quality=95)
             contenido_optimo = buffer_optimo.getvalue()
             
-            # 2. Analizamos con la versión ligera
+            # 3. Análisis de IA Visual
             resultado_ia_profundo = analizar_imagen_aislada(contenido_optimo)
-            resultado_ela = aplicar_analisis_ela(contenido_optimo)
             
-            if resultado_ela and resultado_ela.get("ela_ejecutado"):
-                metadatos_extraidos["analisis_ela_matematico"] = resultado_ela
-                
-            # 3. Limpieza estricta de RAM
+            # 4. Limpieza de memoria
             del img
             del buffer_optimo
             gc.collect() 
@@ -206,7 +209,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
 
     elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
         tipo_evidencia = "VIDEO"
-        metadatos_extraidos["info_video"] = "Procesando muestreo temporal (3 frames)."
+        metadatos_extraidos["info_video"] = "Procesando muestreo temporal."
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
             temp_video.write(contenido)
@@ -223,7 +226,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 captura.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 exito, frame = captura.read()
                 if exito:
-                    # Optimizamos también los frames de video
                     frame_achicado = cv2.resize(frame, (800, int(800 * frame.shape[0] / frame.shape[1])))
                     _, buffer = cv2.imencode('.jpg', frame_achicado)
                     resultado_frame = analizar_imagen_aislada(buffer.tobytes())
@@ -239,9 +241,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 "rostros_detectados_total": rostros_totales,
                 "score_ia": analisis_frames[1]["score_ia"] if len(analisis_frames) > 1 else None
             }
-            
-            gc.collect() # Limpieza de RAM después de procesar video
-            
+            gc.collect() 
         except Exception as e:
             metadatos_extraidos["error_video"] = f"Error OpenCV: {str(e)}"
         finally:
@@ -254,35 +254,50 @@ async def analizar_archivo(file: UploadFile = File(...)):
             metadatos_extraidos.update({f"PDF_{k.replace('/', '')}": str(v) for k, v in reader.metadata.items()})
         except: pass
 
-    # --- LÓGICA DE CERTEZA HÍBRIDA ---
+    # --- NUEVA LÓGICA DE CERTEZA HÍBRIDA (EL CEREBRO DE FORENSIA) ---
     resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos, es_captura)
     
     if tipo_evidencia == "IMAGEN" and resultado_ia_profundo:
         score_data = resultado_ia_profundo.get("score_ia")
         confianza_visual = 0.0
         etiqueta_visual = ""
+        error_ia = None
         
-        if isinstance(score_data, dict) and "label" in score_data:
-            confianza_visual = float(score_data.get("score", 0.0))
-            etiqueta_visual = str(score_data.get("label", "")).lower()
+        # Procesamos la respuesta, ya sea un éxito o un error explícito
+        if isinstance(score_data, dict):
+            if "error" in score_data:
+                error_ia = score_data["error"]
+            elif "label" in score_data:
+                confianza_visual = float(score_data.get("score", 0.0))
+                etiqueta_visual = str(score_data.get("label", "")).lower()
             
         anomalia_ela = False
         if resultado_ela and resultado_ela.get("ela_ejecutado"):
             anomalia_ela = resultado_ela.get("anomalia_detectada_ela", False)
 
-        es_ia_visual_alta = ("fake" in etiqueta_visual or "artificial" in etiqueta_visual) and confianza_visual > 0.85
-
-        if es_ia_visual_alta:
+        # Regla 1: Si la API de IA falló (ej. sobrecarga)
+        if error_ia:
             if anomalia_ela:
                 resultado_estructural["nivel_riesgo"] = "ALTO"
-                resultado_estructural["motivo"] = f"Alta probabilidad de manipulación ({int(confianza_visual*100)}%). El análisis matemático confirma compresión anómala."
+                resultado_estructural["motivo"] = f"Alerta ELA: Píxeles alterados o insertados asimétricamente. Nota: Red Neuronal fuera de línea ({error_ia})."
             else:
-                resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
-                resultado_estructural["motivo"] = f"La IA visual detectó anomalías ({int(confianza_visual*100)}%), pero el análisis ELA matemático confirma que la compresión es natural. Posible filtro o foto de cámara."
-                
-        elif anomalia_ela:
-            resultado_estructural["nivel_riesgo"] = "ALTO"
-            resultado_estructural["motivo"] = "El análisis visual no es concluyente, pero el motor matemático ELA descubrió parches o texturas insertadas asimétricamente."
+                resultado_estructural["nivel_riesgo"] = "AMBIGUO"
+                resultado_estructural["motivo"] = f"Análisis visual inaccesible ({error_ia}). La evaluación matemática no reporta anomalías evidentes de inpainting."
+        else:
+            # Regla 2: La API funcionó. Umbral bajado a 70% para mayor agudeza
+            es_ia_visual_alta = ("fake" in etiqueta_visual or "artificial" in etiqueta_visual) and confianza_visual > 0.70
+
+            if es_ia_visual_alta:
+                # Si la imagen es generada 100% por IA, el riesgo es ALTO independientemente del ELA
+                resultado_estructural["nivel_riesgo"] = "ALTO"
+                if anomalia_ela:
+                    resultado_estructural["motivo"] = f"Manipulación confirmada ({int(confianza_visual*100)}% certeza visual). Análisis matemático detecta además parches asimétricos."
+                else:
+                    resultado_estructural["motivo"] = f"Síntesis Visual detectada ({int(confianza_visual*100)}% certeza). Estructura generativa completa sin parches evidentes."
+            elif anomalia_ela:
+                # Regla 3: Falso negativo de la IA (Ej. relleno de tu blusa). La IA no lo ve, pero la matemática sí.
+                resultado_estructural["nivel_riesgo"] = "ALTO"
+                resultado_estructural["motivo"] = "Anomalía Forense: La IA no detectó alteraciones, pero el motor matemático descubrió Inpainting o alteraciones parciales."
 
     return {
         "nombre_archivo": file.filename,
