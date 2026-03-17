@@ -199,9 +199,14 @@ async def analizar_archivo(file: UploadFile = File(...)):
         top_label = str(score_data[0].get("label", "")).lower()
         top_score = float(score_data[0].get("score", 0.0))
         
-        if any(x in top_label for x in ["human", "hum", "real", "genuine", "0"]):
+        # EL PARCHE FORENSE: Lista universal de etiquetas para fotos verdaderas
+        etiquetas_sanas = ["human", "hum", "real", "genuine", "original", "nature", "0", "legitimate", "photograph", "not ai", "not_ai"]
+        
+        if any(palabra in top_label for palabra in etiquetas_sanas):
+            # Si el modelo usa cualquiera de estas palabras, invertimos el porcentaje
             porcentaje_ia = (1.0 - top_score) * 100
         else:
+            # Si dice "fake", "ai", "generated", "1", etc.
             porcentaje_ia = top_score * 100
             
     elif isinstance(resultado_ia_profundo, dict) and "error" in resultado_ia_profundo:
@@ -216,12 +221,10 @@ async def analizar_archivo(file: UploadFile = File(...)):
     else:
         # --- EL MODO ESCÉPTICO ---
         if tiene_exif_real:
-            # Foto de cámara pura. Confiamos en los umbrales normales.
             umbral_alto = 75.0
             umbral_preventivo = 35.0
         else:
-            # Captura de pantalla, WhatsApp o sin metadatos.
-            # Sabemos que la IA sufre alucinaciones aquí, así que somos súper exigentes.
+            # Para capturas de pantalla y fotos de WhatsApp (sin EXIF)
             umbral_alto = 92.0
             umbral_preventivo = 65.0
 
@@ -241,7 +244,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 
         else:
             resultado_estructural["nivel_riesgo"] = "BAJO"
-            resultado_estructural["motivo"] = "Estructura óptica consistente. Alta probabilidad de origen natural sin manipulaciones evidentes."
+            resultado_estructural["motivo"] = "Estructura óptica y neuronal consistente. Alta probabilidad de origen natural sin manipulaciones evidentes."
 
     return {
         "nombre_archivo": file.filename,
