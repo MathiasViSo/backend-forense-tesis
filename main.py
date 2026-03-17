@@ -42,17 +42,14 @@ def consultar_ia_profesional(contenido_bytes: bytes, tipo: str):
         
     try:
         if tipo == "IMAGE":
-            # El SDK requiere un objeto Image de PIL, no bytes crudos
-            imagen = Image.open(io.BytesIO(contenido_bytes)).convert("RGB")
-            
-            # .image_classification maneja el "despertar" del modelo de forma nativa
-            resultados = hf_client.image_classification(imagen, model=MODELO_IMAGEN)
+            # --- CORRECCIÓN FORENSE ---
+            # El SDK requiere los bytes crudos (binario), no el objeto PIL abierto
+            resultados = hf_client.image_classification(contenido_bytes, model=MODELO_IMAGEN)
             
             # Convertimos la respuesta del SDK a nuestra lista de diccionarios
             return [{"label": res.label, "score": res.score} for res in resultados]
             
         elif tipo == "AUDIO":
-            # Para audio, el cliente permite mandar los bytes directos
             resultados = hf_client.audio_classification(contenido_bytes, model=MODELO_AUDIO)
             return [{"label": res.label, "score": res.score} for res in resultados]
             
