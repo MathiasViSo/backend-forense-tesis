@@ -36,27 +36,40 @@ FIRMAS_IA = [
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 def consultar_ia_profesional(contenido_bytes: bytes, tipo: str):
-    """Consulta usando el SDK oficial de Hugging Face Hub"""
+    """Consulta usando el SDK oficial de Hugging Face Hub con archivos temporales blindados"""
     if not hf_client:
         return {"error": "El cliente de Hugging Face no pudo inicializarse. Revisa el Token."}
         
     try:
         if tipo == "IMAGE":
-            # --- CORRECCIÓN FORENSE ---
-            # El SDK requiere los bytes crudos (binario), no el objeto PIL abierto
-            resultados = hf_client.image_classification(contenido_bytes, model=MODELO_IMAGEN)
-            
-            # Convertimos la respuesta del SDK a nuestra lista de diccionarios
-            return [{"label": res.label, "score": res.score} for res in resultados]
+            # 1. Creamos un archivo temporal físico para evitar el error de Content-Type
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                tmp.write(contenido_bytes)
+                ruta_temporal = tmp.name
+                
+            try:
+                # 2. El SDK lee el archivo perfectamente porque ya sabe que es un JPG
+                resultados = hf_client.image_classification(ruta_temporal, model=MODELO_IMAGEN)
+                return [{"label": res.label, "score": res.score} for res in resultados]
+            finally:
+                # 3. Borramos la evidencia del servidor inmediatamente para no saturar Render
+                os.remove(ruta_temporal)
             
         elif tipo == "AUDIO":
-            resultados = hf_client.audio_classification(contenido_bytes, model=MODELO_AUDIO)
-            return [{"label": res.label, "score": res.score} for res in resultados]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(contenido_bytes)
+                ruta_temporal = tmp.name
+                
+            try:
+                resultados = hf_client.audio_classification(ruta_temporal, model=MODELO_AUDIO)
+                return [{"label": res.label, "score": res.score} for res in resultados]
+            finally:
+                os.remove(ruta_temporal)
             
     except Exception as e:
         error_msg = str(e).lower()
-        if "503" in error_msg or "loading" in error_msg:
-            return {"error": "La Red Neuronal se está encendiendo. Por favor, intenta de nuevo en 30 segundos."}
+        if "503" in error_msg or "loading" in error_msg or "time" in error_msg:
+            return {"error": "La Red Neuronal se está encendiendo en la nube. Por favor, reintenta en 30 segundos."}
         return {"error": f"Fallo en SDK de Hugging Face: {str(e)}"}
 
 # --- MOTOR FORENSE ELA ---
