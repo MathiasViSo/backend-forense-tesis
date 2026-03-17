@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile
 import hashlib
-from PIL import Image, ImageChops, ImageEnhance
+from PIL import Image, ImageChops, ImageEnhance, ImageFile
 from pypdf import PdfReader
 from mutagen import File as MutagenFile
 import io
@@ -13,15 +13,16 @@ import base64
 import time
 import gc
 
+# Esto evita que PIL arroje error si la imagen subida desde el celular está ligeramente corrupta
+ImageFile.LOAD_TRUNCATED_IMAGES = True 
+
 app = FastAPI()
 
-# Configuración de Entorno
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Modelos reordenados por precisión forense actual
 MODELS = {
     "IMAGE": [
-        "Nahrawy/AI-Generated-Image-Detector", # Muy preciso, menos falsos positivos con cámaras reales
+        "Nahrawy/AI-Generated-Image-Detector",
         "dima806/ai_vs_real_image_detection", 
         "umm-maybe/AI-image-detector"
     ], 
@@ -44,15 +45,10 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_mode
     
     lista_modelos = MODELS[tipo]
     ultimo_error = "Desconocido"
-    
-    # --- LA ETIQUETA FORENSE (NUEVO) ---
-    # Le decimos exactamente al servidor qué tipo de evidencia está recibiendo
     tipo_mime = "image/jpeg" if tipo == "IMAGE" else "application/octet-stream"
     
     for modelo in lista_modelos:
         url = f"https://router.huggingface.co/hf-inference/models/{modelo}"
-        
-        # Inyectamos el Content-Type en las cabeceras
         headers = {
             "Authorization": f"Bearer {HF_TOKEN}",
             "Content-Type": tipo_mime
@@ -101,7 +97,6 @@ def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90
         ela_array = np.array(diferencia_ela)
         
         desviacion_ruido = float(np.std(ela_array))
-        # CALIBRACIÓN: Subimos a 18.0 para ignorar el ruido natural de las cámaras
         sospecha_manipulacion = desviacion_ruido > 18.0 
         
         extremos = diferencia_ela.getextrema()
@@ -146,43 +141,55 @@ async def analizar_archivo(file: UploadFile = File(...)):
     resultado_ia_profundo = None
     resultado_ela = None
     tipo_evidencia = "DESCONOCIDO"
-    tiene_exif_real = False # Nuestro nuevo escudo protector
+    tiene_exif_real = False 
 
     if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
         tipo_evidencia = "IMAGEN"
         try:
-            resultado_ela = aplicar_analisis_ela(contenido)
+            # 1. ESCUDO DE MEMORIA RAM PARA RENDER (Evita colapsos con fotos de >10MB)
+            img_original = Image.open(io.BytesIO(contenido))
+            
+            try:
+                exif_data = img_original._getexif()
+                if exif_data:
+                    tiene_exif_real = True
+                    metadatos_extraidos["ALERTA_OPTICA"] = "Datos de lente físico detectados."
+            except: pass
+
+            # Si la foto es un monstruo gigante, la achicamos manteniendo su proporción
+            if img_original.width > 2000 or img_original.height > 2000:
+                # thumbnail modifica la imagen "in place"
+                img_original.thumbnail((2000, 2000))
+                
+            img_original = img_original.convert('RGB')
+            metadatos_extraidos.update({f"IMG_{k}": str(v) for k, v in img_original.info.items() if isinstance(v, (str, bytes))})
+            
+            # Guardamos la imagen procesada y segura en memoria
+            buffer_seguro = io.BytesIO()
+            img_original.save(buffer_seguro, format="JPEG", quality=98)
+            contenido_seguro = buffer_seguro.getvalue()
+
+            # 2. Análisis ELA con la imagen segura (no colapsará)
+            resultado_ela = aplicar_analisis_ela(contenido_seguro)
             if resultado_ela and resultado_ela.get("ela_ejecutado"):
                 metadatos_extraidos["analisis_ela_matematico"] = resultado_ela
 
-            img = Image.open(io.BytesIO(contenido))
+            # 3. Preparamos una versión ultraligera solo para la IA
+            img_ia = img_original.copy()
+            img_ia.thumbnail((800, 800)) 
+            buffer_ia = io.BytesIO()
+            img_ia.save(buffer_ia, format="JPEG", quality=95)
             
-            # --- EL ESCUDO EXIF (DETECTOR DE CÁMARA REAL) ---
-            try:
-                exif_data = img._getexif()
-                if exif_data:
-                    tiene_exif_real = True
-                    metadatos_extraidos["ALERTA_OPTICA"] = "Datos de lente físico detectados. Protegiendo contra falsos positivos."
-            except: pass
-
-            img = img.convert('RGB')
-            metadatos_extraidos.update({f"IMG_{k}": str(v) for k, v in img.info.items() if isinstance(v, (str, bytes))})
+            resultado_ia_profundo = consultar_modelo_hf(buffer_ia.getvalue(), "IMAGE")
             
-            img.thumbnail((800, 800)) 
-            buffer_optimo = io.BytesIO()
-            img.save(buffer_optimo, format="JPEG", quality=95)
-            contenido_optimo = buffer_optimo.getvalue()
-            
-            # Solo pasamos la imagen cruda, quitamos el biométrico para no confundir a la IA principal
-            resultado_ia_profundo = consultar_modelo_hf(contenido_optimo, "IMAGE")
-            del img, buffer_optimo
+            # Limpieza profunda de RAM
+            del img_original, img_ia, buffer_seguro, buffer_ia
             gc.collect() 
         except Exception as e: print(f"Error procesando imagen: {e}")
 
-    # (Lógica de video y audio simplificada omitida para enfocar en la precisión de imagen, 
-    # asume que funciona igual que tu código anterior)
+    # (Lógica omitida de video/audio, puedes integrar tu código previo si los necesitas)
 
-    # --- LÓGICA DE CALIBRACIÓN DINÁMICA DE RIESGO ---
+    # --- CEREBRO FORENSE DE CALIBRACIÓN DINÁMICA ---
     resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos, es_captura)
     porcentaje_ia = 0.0
     error_ia = None
@@ -203,39 +210,34 @@ async def analizar_archivo(file: UploadFile = File(...)):
     anomalia_ela = resultado_ela.get("anomalia_detectada_ela", False) if resultado_ela else False
     resultado_estructural["porcentaje_ia"] = round(porcentaje_ia, 2)
 
-    # --- EL CEREBRO DE FORENSIA (ANTI FALSOS POSITIVOS) ---
     if error_ia:
         resultado_estructural["nivel_riesgo"] = "AMBIGUO"
         resultado_estructural["motivo"] = error_ia
     else:
-        # Definimos los umbrales base
-        umbral_alto = 70.0
-        umbral_preventivo = 25.0
-
-        # Si detectamos que es una foto de cámara real, subimos la exigencia matemática
+        # --- EL MODO ESCÉPTICO ---
         if tiene_exif_real:
-            umbral_alto = 95.0  # Solo marcará ALTO si la IA está absolutamente segura (evita falsos por HDR)
-            umbral_preventivo = 60.0
-            
-        # Si es captura de pantalla, somos escépticos con la IA
-        if es_captura:
-            umbral_alto = 85.0
-            umbral_preventivo = 50.0
+            # Foto de cámara pura. Confiamos en los umbrales normales.
+            umbral_alto = 75.0
+            umbral_preventivo = 35.0
+        else:
+            # Captura de pantalla, WhatsApp o sin metadatos.
+            # Sabemos que la IA sufre alucinaciones aquí, así que somos súper exigentes.
+            umbral_alto = 92.0
+            umbral_preventivo = 65.0
 
-        # Evaluación final con los umbrales dinámicos
         if porcentaje_ia >= umbral_alto:
             resultado_estructural["nivel_riesgo"] = "ALTO"
             if tiene_exif_real:
-                resultado_estructural["motivo"] = f"ALERTA: Manipulación severa detectada ({round(porcentaje_ia)}%). El archivo intenta hacerse pasar por una foto de cámara real."
+                resultado_estructural["motivo"] = f"ALERTA: Evidencia fotográfica sintética o severamente manipulada ({round(porcentaje_ia)}%)."
             else:
-                resultado_estructural["motivo"] = f"Evidencia sintética. Alta probabilidad de generación mediante Inteligencia Artificial ({round(porcentaje_ia)}%)."
+                resultado_estructural["motivo"] = f"A pesar de la compresión, existe altísima probabilidad de generación mediante IA ({round(porcentaje_ia)}%)."
                 
         elif porcentaje_ia >= umbral_preventivo or anomalia_ela:
             resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
-            if tiene_exif_real or es_captura:
-                resultado_estructural["motivo"] = f"El porcentaje de IA ({round(porcentaje_ia)}%) se debe probablemente a la compresión de la red social o al procesamiento HDR del teléfono."
+            if not tiene_exif_real:
+                resultado_estructural["motivo"] = f"Atención: El porcentaje ({round(porcentaje_ia)}%) se debe muy probablemente a la compresión de la captura o filtro de red social. Evidencia no concluyente."
             else:
-                resultado_estructural["motivo"] = "Se detectan trazas leves de edición digital o alteraciones en la textura de los píxeles (ELA)."
+                resultado_estructural["motivo"] = "Se detectan trazas leves de edición digital. Requiere revisión humana."
                 
         else:
             resultado_estructural["nivel_riesgo"] = "BAJO"
@@ -245,7 +247,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
         "nombre_archivo": file.filename,
         "hash_sha256": hash_sha256,
         "tipo_evidencia": tipo_evidencia,
-        "es_captura": es_captura,
+        "es_captura": es_captura or not tiene_exif_real,
         "analisis": resultado_estructural,
         "detalles_biometricos": {"score_ia": resultado_ia_profundo},
         "detalles_tecnicos": metadatos_extraidos
