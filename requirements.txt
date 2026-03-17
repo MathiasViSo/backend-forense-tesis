@@ -5,6 +5,6 @@ pillow
 pypdf
 python-docx
 mutagen
-requests
+huggingface_hub
 opencv-python-headless
 numpy

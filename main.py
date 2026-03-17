@@ -1,34 +1,31 @@
 from fastapi import FastAPI, File, UploadFile
+from huggingface_hub import InferenceClient
 import hashlib
 from PIL import Image, ImageChops, ImageEnhance
 from pypdf import PdfReader
 from mutagen import File as MutagenFile
 import io
 import os
-import requests
 import cv2
 import numpy as np
-import tempfile
 import base64
-import time
 import gc
 
 app = FastAPI()
 
-# Configuración de Entorno
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Sistema de Alta Disponibilidad: Los 3 mejores modelos actuales
-MODELS = {
-    "IMAGE": [
-        "dima806/ai_vs_real_image_detection", 
-        "Ateeqq/ai-vs-human-image-detector",
-        "umm-maybe/AI-image-detector"
-    ], 
-    "AUDIO": [
-        "ResembleAI/ai_detector_audio"
-    ]
-}
+# --- EL NUEVO MOTOR PROFESIONAL DE HUGGING FACE ---
+# Inicializamos el cliente oficial que maneja colas, timeouts y retries automáticamente
+try:
+    hf_client = InferenceClient(token=HF_TOKEN)
+except Exception as e:
+    print(f"Error iniciando cliente HF: {e}")
+    hf_client = None
+
+# Los dos mejores modelos de detección de la capa gratuita
+MODELO_IMAGEN = "dima806/ai_vs_real_image_detection"
+MODELO_AUDIO = "ResembleAI/ai_detector_audio"
 
 FIRMAS_IA = [
     "midjourney", "dall-e", "stable diffusion", "adobe firefly", 
@@ -38,64 +35,34 @@ FIRMAS_IA = [
 
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_modelo=4):
-    if not HF_TOKEN or tipo not in MODELS:
-        return {"error": "Credenciales de IA no configuradas en el servidor."}
-    
-    lista_modelos = MODELS[tipo]
-    
-    for modelo in lista_modelos:
-        url = f"https://api-inference.huggingface.co/models/{modelo}"
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+def consultar_ia_profesional(contenido_bytes: bytes, tipo: str):
+    """Consulta usando el SDK oficial de Hugging Face Hub"""
+    if not hf_client:
+        return {"error": "El cliente de Hugging Face no pudo inicializarse. Revisa el Token."}
         
-        print(f"\n[{tipo}] Conectando con: {modelo}...")
-        
-        for intento in range(max_intentos_por_modelo):
-            try:
-                response = requests.post(url, headers=headers, data=contenido_bytes)
-                
-                # --- NUEVA LÓGICA PACIENTE ---
-                # Si el modelo está dormido (503), leemos el tiempo que necesita
-                if response.status_code == 503:
-                    try:
-                        resultado = response.json()
-                        if "estimated_time" in resultado:
-                            t = float(resultado["estimated_time"])
-                            print(f"[{modelo}] Despertando... Esperando {round(t, 1)} segundos.")
-                            time.sleep(t + 2)
-                            continue
-                    except:
-                        pass
-                    # Si no manda tiempo, esperamos 15s genéricos
-                    print(f"[{modelo}] Servidor ocupado. Reintentando en 15s...")
-                    time.sleep(15)
-                    continue
-                
-                # Si el modelo fue borrado (404/410)
-                if response.status_code in [404, 410]:
-                    print(f"[{modelo}] Modelo no disponible. Cambiando al siguiente...")
-                    break
-                    
-                # Si hay otro error raro, cambiamos de modelo
-                if response.status_code != 200:
-                    print(f"[{modelo}] Error HTTP {response.status_code}. Cambiando...")
-                    break
-                
-                # ¡ÉXITO! Leemos la respuesta
-                resultado = response.json()
-                
-                if isinstance(resultado, list):
-                    if len(resultado) > 0 and isinstance(resultado[0], list):
-                        return resultado[0]
-                    return resultado
-                    
-                return resultado
-            except Exception as e:
-                print(f"Fallo de conexión con {modelo}: {e}")
-                break # Pasa al siguiente modelo
-                
-    return {"error": "Todos los servidores neuronales están caídos o requieren mucho tiempo."}
+    try:
+        if tipo == "IMAGE":
+            # El SDK requiere un objeto Image de PIL, no bytes crudos
+            imagen = Image.open(io.BytesIO(contenido_bytes)).convert("RGB")
+            
+            # .image_classification maneja el "despertar" del modelo de forma nativa
+            resultados = hf_client.image_classification(imagen, model=MODELO_IMAGEN)
+            
+            # Convertimos la respuesta del SDK a nuestra lista de diccionarios
+            return [{"label": res.label, "score": res.score} for res in resultados]
+            
+        elif tipo == "AUDIO":
+            # Para audio, el cliente permite mandar los bytes directos
+            resultados = hf_client.audio_classification(contenido_bytes, model=MODELO_AUDIO)
+            return [{"label": res.label, "score": res.score} for res in resultados]
+            
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "503" in error_msg or "loading" in error_msg:
+            return {"error": "La Red Neuronal se está encendiendo. Por favor, intenta de nuevo en 30 segundos."}
+        return {"error": f"Fallo en SDK de Hugging Face: {str(e)}"}
 
+# --- MOTOR FORENSE ELA ---
 def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
     try:
         imagen_original = Image.open(io.BytesIO(contenido_imagen)).convert('RGB')
@@ -141,10 +108,10 @@ def analizar_imagen_aislada(imagen_bytes: bytes) -> dict:
         x, y, w, h = rostros[0]
         rostro_recortado = img[y:y+h, x:x+w]
         _, buffer = cv2.imencode('.jpg', rostro_recortado)
-        score_ia = consultar_modelo_hf(buffer.tobytes(), "IMAGE")
+        score_ia = consultar_ia_profesional(buffer.tobytes(), "IMAGE")
         return {"modo_analisis": "BIOMÉTRICO", "rostros_detectados": len(rostros), "score_ia": score_ia}
     else:
-        score_ia = consultar_modelo_hf(imagen_bytes, "IMAGE")
+        score_ia = consultar_ia_profesional(imagen_bytes, "IMAGE")
         return {"modo_analisis": "OBJETOS_Y_SUPERFICIES", "rostros_detectados": 0, "score_ia": score_ia}
 
 def realizar_analisis_forense_metadatos(contenido: bytes, metadatos: dict, es_captura: bool) -> dict:
@@ -201,9 +168,9 @@ async def analizar_archivo(file: UploadFile = File(...)):
             if audio:
                 metadatos_extraidos.update({f"AUDIO_{k}": str(v) for k, v in audio.items()})
         except: pass
-        resultado_ia_profundo = {"modo_analisis": "ESPECTROGRAMA", "score_ia": consultar_modelo_hf(contenido, "AUDIO")}
+        resultado_ia_profundo = {"modo_analisis": "ESPECTROGRAMA", "score_ia": consultar_ia_profesional(contenido, "AUDIO")}
 
-    # --- LÓGICA UNIVERSAL DE PORCENTAJE ---
+    # --- LÓGICA DE PORCENTAJE ---
     resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos, es_captura)
     porcentaje_ia = 0.0
     error_ia = None
@@ -229,17 +196,17 @@ async def analizar_archivo(file: UploadFile = File(...)):
 
         if error_ia:
             resultado_estructural["nivel_riesgo"] = "AMBIGUO"
-            resultado_estructural["motivo"] = f"Aviso de Red Neuronal: {error_ia}"
+            resultado_estructural["motivo"] = error_ia
         else:
             if porcentaje_ia > 60.0:
                 resultado_estructural["nivel_riesgo"] = "ALTO"
-                resultado_estructural["motivo"] = "Análisis visual detecta alta probabilidad de origen sintético o manipulado."
+                resultado_estructural["motivo"] = "Análisis de Red Neuronal detecta alta probabilidad de origen sintético."
             elif porcentaje_ia > 20.0 or anomalia_ela:
                 resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
-                resultado_estructural["motivo"] = "Se detectan trazas de IA o manipulación de píxeles (ELA)."
+                resultado_estructural["motivo"] = "Se detectan trazas de IA o alteraciones matemáticas (ELA)."
             else:
                 resultado_estructural["nivel_riesgo"] = "BAJO"
-                resultado_estructural["motivo"] = "Probabilidad dominante de origen natural/cámara."
+                resultado_estructural["motivo"] = "Estructura correspondiente a origen humano/cámara."
 
     return {
         "nombre_archivo": file.filename,
