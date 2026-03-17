@@ -47,27 +47,30 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_mode
     for modelo in lista_modelos:
         url = f"https://api-inference.huggingface.co/models/{modelo}"
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        print(f"\n[INFO FORENSE] Intentando conectar con la red: {modelo}")
         
         for intento in range(max_intentos_por_modelo):
             try:
                 response = requests.post(url, headers=headers, data=contenido_bytes)
+                print(f"[DEBUG] Intento {intento+1} - Código HTTP {response.status_code} de {modelo}")
                 
                 if response.status_code == 503:
                     try:
                         t = float(response.json().get("estimated_time", 15.0))
+                        print(f"[ESPERA] El modelo está apagado. Despertando en {round(t, 1)}s...")
                         time.sleep(t + 2)
                         continue
                     except:
                         time.sleep(10)
                         continue
                 
-                if response.status_code in [404, 410]:
-                    break # Modelo no disponible, saltar al siguiente
-                    
                 if response.status_code != 200:
-                    break
+                    # ¡AQUÍ ESTÁ LA MAGIA! Imprimimos el insulto exacto de Hugging Face
+                    print(f"[ERROR FATAL] Hugging Face rechazó la foto. Motivo exacto: {response.text}")
+                    break # Pasamos al siguiente modelo de respaldo
                 
                 resultado = response.json()
+                print(f"[ÉXITO] ¡Conexión neuronal establecida con {modelo}!")
                 
                 if isinstance(resultado, list):
                     if len(resultado) > 0 and isinstance(resultado[0], list):
@@ -76,9 +79,10 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_mode
                     
                 return resultado
             except Exception as e:
-                break # Fallo interno, saltar al siguiente
+                print(f"[EXCEPCIÓN CRÍTICA] Fallo de red local: {e}")
+                break # Saltar al siguiente modelo
                 
-    return {"error": "Servidores de IA saturados. Intentando análisis matemático local."}
+    return {"error": "Servidores de IA saturados o acceso denegado. Intentando análisis matemático local."}
 
 def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
     try:
