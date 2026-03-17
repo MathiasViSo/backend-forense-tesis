@@ -8,3 +8,4 @@ mutagen
 huggingface_hub
 opencv-python-headless
 numpy
+requests
