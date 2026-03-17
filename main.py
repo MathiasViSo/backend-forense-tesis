@@ -18,10 +18,16 @@ app = FastAPI()
 # Configuración de Entorno
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Modelos actualizados y estables
+# --- NUEVO: SISTEMA DE ALTA DISPONIBILIDAD (CASCADA DE MODELOS) ---
 MODELS = {
-    "IMAGE": "Organika/sdxl-detector", 
-    "AUDIO": "facebook/wav2vec2-base-960h"
+    "IMAGE": [
+        "Ateeqq/ai-vs-human-image-detector", 
+        "dima806/ai_vs_human_generated_image_detection",
+        "umm-maybe/AI-image-detector"
+    ], 
+    "AUDIO": [
+        "ResembleAI/ai_detector_audio"
+    ]
 }
 
 FIRMAS_IA = [
@@ -32,44 +38,57 @@ FIRMAS_IA = [
 
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos=3):
+def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_modelo=2):
     if not HF_TOKEN or tipo not in MODELS:
         return {"error": "Credenciales de IA no configuradas en el servidor."}
     
-    url = f"https://api-inference.huggingface.co/models/{MODELS[tipo]}"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    lista_modelos = MODELS[tipo]
     
-    for intento in range(max_intentos):
-        try:
-            response = requests.post(url, headers=headers, data=contenido_bytes)
-            
-            # Escudo contra errores de servidor (HTML o saturación)
-            if response.status_code != 200:
+    # Recorremos la lista de modelos de respaldo (Plan A, Plan B, Plan C)
+    for modelo in lista_modelos:
+        url = f"https://api-inference.huggingface.co/models/{modelo}"
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        
+        print(f"[{tipo}] Intentando escanear con el modelo: {modelo}...")
+        
+        for intento in range(max_intentos_por_modelo):
+            try:
+                response = requests.post(url, headers=headers, data=contenido_bytes)
+                
+                # Si el modelo fue borrado (410) o no existe (404), saltamos al SIGUIENTE MODELO
+                if response.status_code in [404, 410]:
+                    print(f"[{tipo}] Modelo {modelo} caído (Error {response.status_code}). Cambiando a respaldo...")
+                    break # Rompe el ciclo de reintentos y pasa al siguiente modelo en la lista
+                
+                # Si está saturado o cargando, esperamos
                 if response.status_code == 503:
                     print(f"[{tipo}] Modelo cargando. Reintentando en 10s...")
                     time.sleep(10)
                     continue
-                return {"error": f"Error del servidor neuronal (Código {response.status_code})"}
-            
-            resultado = response.json()
-            
-            # Manejo de tiempo de espera estimado
-            if isinstance(resultado, dict) and "estimated_time" in resultado:
-                t = resultado["estimated_time"]
-                print(f"[{tipo}] Durmiendo. Esperando {t}s...")
-                time.sleep(t + 2)
-                continue
-            
-            if isinstance(resultado, list):
-                if len(resultado) > 0 and isinstance(resultado[0], list):
-                    return resultado[0]
-                return resultado
+                    
+                if response.status_code != 200:
+                    print(f"[{tipo}] Error HTTP {response.status_code}. Cambiando a respaldo...")
+                    break
                 
-            return resultado
-        except Exception as e:
-            return {"error": f"Fallo de conexión pericial: {str(e)}"}
-            
-    return {"error": "Tiempo de espera de IA agotado."}
+                resultado = response.json()
+                
+                if isinstance(resultado, dict) and "estimated_time" in resultado:
+                    t = resultado["estimated_time"]
+                    print(f"[{tipo}] Durmiendo. Esperando {t}s...")
+                    time.sleep(t + 2)
+                    continue
+                
+                if isinstance(resultado, list):
+                    if len(resultado) > 0 and isinstance(resultado[0], list):
+                        return resultado[0]
+                    return resultado
+                    
+                return resultado
+            except Exception as e:
+                print(f"Fallo de conexión con {modelo}: {e}")
+                break # Pasa al siguiente modelo
+                
+    return {"error": "Todos los servidores neuronales de respaldo están caídos o saturados."}
 
 def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
     try:
@@ -167,12 +186,25 @@ async def analizar_archivo(file: UploadFile = File(...)):
             gc.collect() 
         except Exception as e: print(f"Error: {e}")
 
+    elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
+        tipo_evidencia = "VIDEO"
+        resultado_ia_profundo = {"modo_analisis": "VIDEO_FRAMES", "score_ia": []}
+        
+    elif nombre_archivo.endswith(('.mp3', '.wav')):
+        tipo_evidencia = "AUDIO"
+        try:
+            audio = MutagenFile(io.BytesIO(contenido))
+            if audio:
+                metadatos_extraidos.update({f"AUDIO_{k}": str(v) for k, v in audio.items()})
+        except: pass
+        resultado_ia_profundo = {"modo_analisis": "ESPECTROGRAMA", "score_ia": consultar_modelo_hf(contenido, "AUDIO")}
+
     # --- LÓGICA UNIVERSAL DE PORCENTAJE ---
     resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos, es_captura)
     porcentaje_ia = 0.0
     error_ia = None
 
-    if tipo_evidencia == "IMAGEN" and resultado_ia_profundo:
+    if tipo_evidencia in ["IMAGEN", "AUDIO"] and resultado_ia_profundo:
         score_data = resultado_ia_profundo.get("score_ia")
         
         if isinstance(score_data, list) and len(score_data) > 0:
@@ -182,7 +214,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
             top_score = float(score_data[0].get("score", 0.0))
             
             # Cálculo de probabilidad inversa (Detección humana vs artificial)
-            if any(x in top_label for x in ["human", "real", "genuine"]):
+            if any(x in top_label for x in ["human", "hum", "real", "genuine", "0"]):
                 porcentaje_ia = (1.0 - top_score) * 100
             else:
                 porcentaje_ia = top_score * 100
@@ -195,11 +227,11 @@ async def analizar_archivo(file: UploadFile = File(...)):
 
         if error_ia:
             resultado_estructural["nivel_riesgo"] = "AMBIGUO"
-            resultado_estructural["motivo"] = f"Fallo de conexión neuronal: {error_ia}"
+            resultado_estructural["motivo"] = f"Aviso de Red Neuronal: {error_ia}"
         else:
             if porcentaje_ia > 60.0:
                 resultado_estructural["nivel_riesgo"] = "ALTO"
-                resultado_estructural["motivo"] = "Análisis visual detecta alta probabilidad de origen sintético."
+                resultado_estructural["motivo"] = "Análisis visual detecta alta probabilidad de origen sintético o manipulado."
             elif porcentaje_ia > 20.0 or anomalia_ela:
                 resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
                 resultado_estructural["motivo"] = "Se detectan trazas de IA o manipulación de píxeles (ELA)."
