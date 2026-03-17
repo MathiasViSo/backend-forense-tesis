@@ -141,7 +141,9 @@ async def analizar_archivo(file: UploadFile = File(...)):
     nombre_archivo = file.filename.lower()
     hash_sha256 = hashlib.sha256(contenido).hexdigest()
     
-    es_captura = any(p in nombre_archivo for p in ['screenshot', 'captura', 'whatsapp', 'screen_', 'image-', 'img-'])
+    # Lista ampliada de palabras clave de redes sociales que destruyen metadatos
+    palabras_captura = ['screenshot', 'captura', 'whatsapp', 'screen_', 'image-', 'img-', 'instagram', 'ig']
+    es_captura = any(p in nombre_archivo for p in palabras_captura)
     
     metadatos_extraidos = {}
     resultado_ia_profundo = None
@@ -163,14 +165,46 @@ async def analizar_archivo(file: UploadFile = File(...)):
             img.save(buffer_optimo, format="JPEG", quality=95)
             contenido_optimo = buffer_optimo.getvalue()
             
-            resultado_ia_profundo = analizar_imagen_aislada(contenido_optimo)
+            resultado_ia_profundo = consultar_ia_profesional(contenido_optimo, "IMAGE")
             del img, buffer_optimo
             gc.collect() 
         except Exception as e: print(f"Error procesando imagen: {e}")
 
+    # --- RESTAURACIÓN DE LA LÓGICA DE VIDEO ---
     elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
         tipo_evidencia = "VIDEO"
-        resultado_ia_profundo = {"modo_analisis": "VIDEO_FRAMES", "score_ia": []}
+        metadatos_extraidos["info_video"] = "Muestreo temporal de frames activo."
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
+            temp_video.write(contenido)
+            ruta_temp = temp_video.name
+            
+        try:
+            captura = cv2.VideoCapture(ruta_temp)
+            total_frames = int(captura.get(cv2.CAP_PROP_FRAME_COUNT))
+            # Extraemos 2 frames clave (al 30% y al 70% del video) para no saturar la API
+            puntos_extraccion = [int(total_frames * 0.3), int(total_frames * 0.7)]
+            scores_consolidados = []
+
+            for frame_idx in puntos_extraccion:
+                captura.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                exito, frame = captura.read()
+                if exito:
+                    # Achicamos el frame para enviarlo rápido
+                    frame = cv2.resize(frame, (600, int(600 * frame.shape[0] / frame.shape[1])))
+                    _, buffer = cv2.imencode('.jpg', frame)
+                    res_frame = consultar_ia_profesional(buffer.tobytes(), "IMAGE")
+                    
+                    if isinstance(res_frame, list):
+                        scores_consolidados.extend(res_frame)
+            
+            captura.release()
+            resultado_ia_profundo = scores_consolidados
+            gc.collect()
+        except Exception as e:
+            metadatos_extraidos["error_video"] = str(e)
+        finally:
+            os.remove(ruta_temp)
         
     elif nombre_archivo.endswith(('.mp3', '.wav')):
         tipo_evidencia = "AUDIO"
@@ -179,45 +213,49 @@ async def analizar_archivo(file: UploadFile = File(...)):
             if audio:
                 metadatos_extraidos.update({f"AUDIO_{k}": str(v) for k, v in audio.items()})
         except: pass
-        resultado_ia_profundo = {"modo_analisis": "ESPECTROGRAMA", "score_ia": consultar_ia_profesional(contenido, "AUDIO")}
+        resultado_ia_profundo = consultar_ia_profesional(contenido, "AUDIO")
 
-    # --- LÓGICA DE PORCENTAJE ---
+    # --- LÓGICA CALIBRADA DE PORCENTAJE ---
     resultado_estructural = realizar_analisis_forense_metadatos(contenido, metadatos_extraidos, es_captura)
     porcentaje_ia = 0.0
     error_ia = None
 
-    if tipo_evidencia in ["IMAGEN", "AUDIO"] and resultado_ia_profundo:
-        score_data = resultado_ia_profundo.get("score_ia")
+    # Normalizamos el resultado de la IA sin importar si vino de foto, audio o frame de video
+    score_data = resultado_ia_profundo
+
+    if isinstance(score_data, list) and len(score_data) > 0:
+        score_data = sorted(score_data, key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        top_label = str(score_data[0].get("label", "")).lower()
+        top_score = float(score_data[0].get("score", 0.0))
         
-        if isinstance(score_data, list) and len(score_data) > 0:
-            score_data = sorted(score_data, key=lambda x: float(x.get("score", 0.0)), reverse=True)
-            top_label = str(score_data[0].get("label", "")).lower()
-            top_score = float(score_data[0].get("score", 0.0))
-            
-            if any(x in top_label for x in ["human", "hum", "real", "genuine", "0"]):
-                porcentaje_ia = (1.0 - top_score) * 100
-            else:
-                porcentaje_ia = top_score * 100
-                
-        elif isinstance(score_data, dict) and "error" in score_data:
-            error_ia = score_data["error"]
-
-        anomalia_ela = resultado_ela.get("anomalia_detectada_ela", False) if resultado_ela else False
-        resultado_estructural["porcentaje_ia"] = round(porcentaje_ia, 2)
-
-        if error_ia:
-            resultado_estructural["nivel_riesgo"] = "AMBIGUO"
-            resultado_estructural["motivo"] = error_ia
+        if any(x in top_label for x in ["human", "hum", "real", "genuine", "0"]):
+            porcentaje_ia = (1.0 - top_score) * 100
         else:
-            if porcentaje_ia > 60.0:
-                resultado_estructural["nivel_riesgo"] = "ALTO"
-                resultado_estructural["motivo"] = "Análisis de Red Neuronal detecta alta probabilidad de origen sintético."
-            elif porcentaje_ia > 20.0 or anomalia_ela:
-                resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
-                resultado_estructural["motivo"] = "Se detectan trazas de IA o alteraciones matemáticas (ELA)."
-            else:
-                resultado_estructural["nivel_riesgo"] = "BAJO"
-                resultado_estructural["motivo"] = "Estructura correspondiente a origen humano/cámara."
+            porcentaje_ia = top_score * 100
+            
+    elif isinstance(score_data, dict) and "error" in score_data:
+        error_ia = score_data["error"]
+
+    anomalia_ela = resultado_ela.get("anomalia_detectada_ela", False) if resultado_ela else False
+    resultado_estructural["porcentaje_ia"] = round(porcentaje_ia, 2)
+
+    if error_ia:
+        resultado_estructural["nivel_riesgo"] = "AMBIGUO"
+        resultado_estructural["motivo"] = f"Aviso de Red Neuronal: {error_ia}"
+    else:
+        # --- ATENUADOR DE FALSOS POSITIVOS PARA CAPTURAS / FILTROS ---
+        if es_captura and porcentaje_ia > 50.0:
+            resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
+            resultado_estructural["motivo"] = "ALERTA: Evidencia altamente comprimida (Captura/Red Social). La IA visual detecta manipulación, pero podría ser un falso positivo debido al filtro o la pérdida de metadatos."
+        elif porcentaje_ia > 60.0:
+            resultado_estructural["nivel_riesgo"] = "ALTO"
+            resultado_estructural["motivo"] = "Análisis visual detecta alta probabilidad de origen sintético o manipulado por IA."
+        elif porcentaje_ia > 20.0 or anomalia_ela:
+            resultado_estructural["nivel_riesgo"] = "PREVENTIVO"
+            resultado_estructural["motivo"] = "Se detectan trazas de alteración. Si el Mapa ELA muestra zonas brillantes, indica Inpainting o clonación."
+        else:
+            resultado_estructural["nivel_riesgo"] = "BAJO"
+            resultado_estructural["motivo"] = "Probabilidad dominante de origen natural/cámara."
 
     return {
         "nombre_archivo": file.filename,
@@ -225,6 +263,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
         "tipo_evidencia": tipo_evidencia,
         "es_captura": es_captura,
         "analisis": resultado_estructural,
-        "detalles_biometricos": resultado_ia_profundo,
+        "detalles_biometricos": {"score_ia": resultado_ia_profundo},
         "detalles_tecnicos": metadatos_extraidos
     }
