@@ -18,11 +18,11 @@ app = FastAPI()
 # Configuración de Entorno
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# --- NUEVO: SISTEMA DE ALTA DISPONIBILIDAD (CASCADA DE MODELOS) ---
+# Sistema de Alta Disponibilidad: Los 3 mejores modelos actuales
 MODELS = {
     "IMAGE": [
-        "Ateeqq/ai-vs-human-image-detector", 
-        "dima806/ai_vs_human_generated_image_detection",
+        "dima806/ai_vs_real_image_detection", 
+        "Ateeqq/ai-vs-human-image-detector",
         "umm-maybe/AI-image-detector"
     ], 
     "AUDIO": [
@@ -38,45 +38,51 @@ FIRMAS_IA = [
 
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_modelo=2):
+def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_modelo=4):
     if not HF_TOKEN or tipo not in MODELS:
         return {"error": "Credenciales de IA no configuradas en el servidor."}
     
     lista_modelos = MODELS[tipo]
     
-    # Recorremos la lista de modelos de respaldo (Plan A, Plan B, Plan C)
     for modelo in lista_modelos:
         url = f"https://api-inference.huggingface.co/models/{modelo}"
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
         
-        print(f"[{tipo}] Intentando escanear con el modelo: {modelo}...")
+        print(f"\n[{tipo}] Conectando con: {modelo}...")
         
         for intento in range(max_intentos_por_modelo):
             try:
                 response = requests.post(url, headers=headers, data=contenido_bytes)
                 
-                # Si el modelo fue borrado (410) o no existe (404), saltamos al SIGUIENTE MODELO
-                if response.status_code in [404, 410]:
-                    print(f"[{tipo}] Modelo {modelo} caído (Error {response.status_code}). Cambiando a respaldo...")
-                    break # Rompe el ciclo de reintentos y pasa al siguiente modelo en la lista
-                
-                # Si está saturado o cargando, esperamos
+                # --- NUEVA LÓGICA PACIENTE ---
+                # Si el modelo está dormido (503), leemos el tiempo que necesita
                 if response.status_code == 503:
-                    print(f"[{tipo}] Modelo cargando. Reintentando en 10s...")
-                    time.sleep(10)
+                    try:
+                        resultado = response.json()
+                        if "estimated_time" in resultado:
+                            t = float(resultado["estimated_time"])
+                            print(f"[{modelo}] Despertando... Esperando {round(t, 1)} segundos.")
+                            time.sleep(t + 2)
+                            continue
+                    except:
+                        pass
+                    # Si no manda tiempo, esperamos 15s genéricos
+                    print(f"[{modelo}] Servidor ocupado. Reintentando en 15s...")
+                    time.sleep(15)
                     continue
+                
+                # Si el modelo fue borrado (404/410)
+                if response.status_code in [404, 410]:
+                    print(f"[{modelo}] Modelo no disponible. Cambiando al siguiente...")
+                    break
                     
+                # Si hay otro error raro, cambiamos de modelo
                 if response.status_code != 200:
-                    print(f"[{tipo}] Error HTTP {response.status_code}. Cambiando a respaldo...")
+                    print(f"[{modelo}] Error HTTP {response.status_code}. Cambiando...")
                     break
                 
+                # ¡ÉXITO! Leemos la respuesta
                 resultado = response.json()
-                
-                if isinstance(resultado, dict) and "estimated_time" in resultado:
-                    t = resultado["estimated_time"]
-                    print(f"[{tipo}] Durmiendo. Esperando {t}s...")
-                    time.sleep(t + 2)
-                    continue
                 
                 if isinstance(resultado, list):
                     if len(resultado) > 0 and isinstance(resultado[0], list):
@@ -88,7 +94,7 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_mode
                 print(f"Fallo de conexión con {modelo}: {e}")
                 break # Pasa al siguiente modelo
                 
-    return {"error": "Todos los servidores neuronales de respaldo están caídos o saturados."}
+    return {"error": "Todos los servidores neuronales están caídos o requieren mucho tiempo."}
 
 def aplicar_analisis_ela(contenido_imagen: bytes, calidad_recompresion: int = 90) -> dict:
     try:
@@ -146,7 +152,7 @@ def realizar_analisis_forense_metadatos(contenido: bytes, metadatos: dict, es_ca
     texto_binario = contenido.decode('utf-8', errors='ignore').lower()
     for firma in FIRMAS_IA:
         if firma in texto_metadatos or firma in texto_binario:
-            return {"detectado": True, "nivel_riesgo": "ALTO", "motivo": f"Firma de '{firma.upper()}' detectada."}
+            return {"detectado": True, "nivel_riesgo": "ALTO", "motivo": f"Firma de '{firma.upper()}' detectada en código base."}
     if es_captura:
         return {"detectado": False, "nivel_riesgo": "PREVENTIVO", "motivo": "Metadatos purgados (Captura/WhatsApp)."}
     return {"detectado": False, "nivel_riesgo": "BAJO", "motivo": "Sin firmas conocidas."}
@@ -167,12 +173,10 @@ async def analizar_archivo(file: UploadFile = File(...)):
     if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
         tipo_evidencia = "IMAGEN"
         try:
-            # 1. ELA se ejecuta sobre el contenido original
             resultado_ela = aplicar_analisis_ela(contenido)
             if resultado_ela and resultado_ela.get("ela_ejecutado"):
                 metadatos_extraidos["analisis_ela_matematico"] = resultado_ela
 
-            # 2. Procesamiento optimizado
             img = Image.open(io.BytesIO(contenido)).convert('RGB')
             metadatos_extraidos.update({f"IMG_{k}": str(v) for k, v in img.info.items() if isinstance(v, (str, bytes))})
             
@@ -184,7 +188,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
             resultado_ia_profundo = analizar_imagen_aislada(contenido_optimo)
             del img, buffer_optimo
             gc.collect() 
-        except Exception as e: print(f"Error: {e}")
+        except Exception as e: print(f"Error procesando imagen: {e}")
 
     elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
         tipo_evidencia = "VIDEO"
@@ -208,12 +212,10 @@ async def analizar_archivo(file: UploadFile = File(...)):
         score_data = resultado_ia_profundo.get("score_ia")
         
         if isinstance(score_data, list) and len(score_data) > 0:
-            # Ordenar por el score más alto
             score_data = sorted(score_data, key=lambda x: float(x.get("score", 0.0)), reverse=True)
             top_label = str(score_data[0].get("label", "")).lower()
             top_score = float(score_data[0].get("score", 0.0))
             
-            # Cálculo de probabilidad inversa (Detección humana vs artificial)
             if any(x in top_label for x in ["human", "hum", "real", "genuine", "0"]):
                 porcentaje_ia = (1.0 - top_score) * 100
             else:
