@@ -45,10 +45,18 @@ def consultar_modelo_hf(contenido_bytes: bytes, tipo: str, max_intentos_por_mode
     lista_modelos = MODELS[tipo]
     ultimo_error = "Desconocido"
     
+    # --- LA ETIQUETA FORENSE (NUEVO) ---
+    # Le decimos exactamente al servidor qué tipo de evidencia está recibiendo
+    tipo_mime = "image/jpeg" if tipo == "IMAGE" else "application/octet-stream"
+    
     for modelo in lista_modelos:
-        # --- LA NUEVA DIRECCIÓN OFICIAL DE HUGGING FACE ---
         url = f"https://router.huggingface.co/hf-inference/models/{modelo}"
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        
+        # Inyectamos el Content-Type en las cabeceras
+        headers = {
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Content-Type": tipo_mime
+        }
         
         for intento in range(max_intentos_por_modelo):
             try:
