@@ -5,3 +5,5 @@ requests
 opencv-python-headless
 pypdf
 python-docx
+yt-dlp
+pydantic
