@@ -1,11 +1,4 @@
 fastapi
 uvicorn
 python-multipart
-pillow
-pypdf
-python-docx
-mutagen
-huggingface_hub
-opencv-python-headless
-numpy
 requests
