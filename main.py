@@ -5,24 +5,21 @@ import requests
 import cv2
 import tempfile
 from pypdf import PdfReader
-import docx  # <-- LIBRERÍA PARA LEER WORD
+import docx  
 import io
 import time
 
 app = FastAPI()
-@app.get("/")
-def home():
-    return {"estado": "API ForensIA v3.0 - Activa y Multimodal"}
 
 # --- CREDENCIALES EMPRESARIALES E HÍBRIDAS ---
 API_USER = os.getenv("SIGHTENGINE_USER")
 API_SECRET = os.getenv("SIGHTENGINE_SECRET")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# --- MODELOS ACTUALIZADOS ---
+# Modelos Especializados de Hugging Face
 HF_TEXT_MODEL = "Hello-SimpleAI/chatgpt-detector-roberta"
-# NUEVO MODELO DE AUDIO ACTIVO EN HUGGING FACE
-HF_AUDIO_MODEL = "MelodyMachine/Deepfake-audio-detection-V2" 
+# NUEVO MODELO DE AUDIO (Verificado y Activo)
+HF_AUDIO_MODEL = "mo-thecreator/Deepfake-audio-detection"
 
 def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_type: str):
     """Motor comercial para Imágenes"""
@@ -35,7 +32,8 @@ def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_t
 
 def analizar_texto_hf(texto: str, max_intentos=3):
     """Motor NLP con blindaje y reintento automático"""
-    url = f"https://router.huggingface.co/hf-inference/models/{HF_TEXT_MODEL}"
+    # PARCHE: URL Oficial Pública de Inference
+    url = f"https://api-inference.huggingface.co/models/{HF_TEXT_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     
     for intento in range(max_intentos):
@@ -62,7 +60,8 @@ def analizar_texto_hf(texto: str, max_intentos=3):
 
 def analizar_audio_hf(audio_bytes: bytes, max_intentos=3):
     """Motor de frecuencias blindado contra caídas del modelo"""
-    url = f"https://router.huggingface.co/hf-inference/models/{HF_AUDIO_MODEL}"
+    # PARCHE: URL Oficial Pública de Inference
+    url = f"https://api-inference.huggingface.co/models/{HF_AUDIO_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/octet-stream"}
     
     for intento in range(max_intentos):
@@ -78,7 +77,7 @@ def analizar_audio_hf(audio_bytes: bytes, max_intentos=3):
             continue
             
         if respuesta.status_code != 200:
-            return {"error": f"El modelo de audio falló o fue retirado (Código HTTP {respuesta.status_code})."}
+            return {"error": f"El modelo de audio falló o no está disponible (Código HTTP {respuesta.status_code})."}
             
         try:
             return respuesta.json()
@@ -152,14 +151,14 @@ async def analizar_archivo(file: UploadFile = File(...)):
             
             if nombre_archivo.endswith('.pdf'):
                 lector = PdfReader(io.BytesIO(contenido))
-                for pagina in lector.pages[:3]:
+                for pagina in lector.pages[:3]: 
                     texto = pagina.extract_text()
                     if texto:
                         texto_extraido += texto + " "
                     
             elif nombre_archivo.endswith('.docx'):
                 documento = docx.Document(io.BytesIO(contenido))
-                for parrafo in documento.paragraphs[:20]:
+                for parrafo in documento.paragraphs[:20]: 
                     if parrafo.text:
                         texto_extraido += parrafo.text + " "
                 
@@ -171,7 +170,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 if isinstance(res, list) and len(res) > 0:
                     datos_scores = res[0] if isinstance(res[0], list) else res
                     
-                    # LÓGICA INVENCIBLE: Sacamos la etiqueta con mayor puntaje
                     mejor_resultado = max(datos_scores, key=lambda x: x.get('score', 0.0))
                     label = str(mejor_resultado.get('label', '')).lower()
                     score = mejor_resultado.get('score', 0.0)
@@ -198,7 +196,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
             res = analizar_audio_hf(contenido)
             
             if isinstance(res, list) and len(res) > 0:
-                # LÓGICA INVENCIBLE: Extraemos el de mayor puntaje
                 mejor_resultado = max(res, key=lambda x: x.get('score', 0.0))
                 label = str(mejor_resultado.get('label', '')).lower()
                 score = mejor_resultado.get('score', 0.0)
