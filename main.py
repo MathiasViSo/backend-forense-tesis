@@ -18,7 +18,8 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 # Modelos Especializados de Hugging Face
 HF_TEXT_MODEL = "Hello-SimpleAI/chatgpt-detector-roberta"
-HF_AUDIO_MODEL = "mrfakename/Wav2Vec2-LJSpeech-AI-Audio-Detector"
+# NUEVO MODELO DE AUDIO (Estable y Activo)
+HF_AUDIO_MODEL = "DunnBC22/wav2vec2-base-Deepfake_Audio_Detection"
 
 def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_type: str):
     """Motor comercial para Imágenes"""
@@ -169,25 +170,17 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 res = analizar_texto_hf(texto_extraido)
                 
                 if isinstance(res, list) and len(res) > 0:
-                    # El Parche: A veces devuelve [[{...}]] y otras veces [{...}]
                     datos_scores = res[0] if isinstance(res[0], list) else res
                     
-                    encontro_ia = False
-                    for item in datos_scores:
-                        etiqueta = str(item.get('label', '')).lower()
-                        # Buscamos variaciones en el nombre de la etiqueta IA
-                        if 'chatgpt' in etiqueta or 'fake' in etiqueta or '1' in etiqueta or 'ai' in etiqueta:
-                            porcentaje_ia = item['score'] * 100
-                            encontro_ia = True
-                            break
-                            
-                    # Si solo devolvió la etiqueta Humano, invertimos
-                    if not encontro_ia:
-                        for item in datos_scores:
-                            etiqueta = str(item.get('label', '')).lower()
-                            if 'human' in etiqueta or 'real' in etiqueta or '0' in etiqueta:
-                                porcentaje_ia = (1.0 - item['score']) * 100
-                                break
+                    # LÓGICA INVENCIBLE: Buscar el puntaje más alto
+                    mejor_resultado = max(datos_scores, key=lambda x: x.get('score', 0.0))
+                    label = str(mejor_resultado.get('label', '')).lower()
+                    score = mejor_resultado.get('score', 0.0)
+                    
+                    if any(x in label for x in ['chatgpt', 'fake', 'ai', '1', 'label_1']):
+                        porcentaje_ia = score * 100
+                    else:
+                        porcentaje_ia = (1.0 - score) * 100
                     
                     desglose_ui = {
                         "perplejidad_linguistica": round(100 - porcentaje_ia, 1),
@@ -204,15 +197,17 @@ async def analizar_archivo(file: UploadFile = File(...)):
         elif nombre_archivo.endswith(('.mp3', '.wav', '.ogg')):
             tipo_evidencia = "AUDIO"
             res = analizar_audio_hf(contenido)
+            
             if isinstance(res, list) and len(res) > 0:
-                res_ordenado = sorted(res, key=lambda x: x['score'], reverse=True)
-                top_label = res_ordenado[0]['label'].lower()
-                top_score = res_ordenado[0]['score']
+                # LÓGICA INVENCIBLE: Buscar el puntaje más alto
+                mejor_resultado = max(res, key=lambda x: x.get('score', 0.0))
+                label = str(mejor_resultado.get('label', '')).lower()
+                score = mejor_resultado.get('score', 0.0)
                 
-                if "fake" in top_label or "ai" in top_label:
-                    porcentaje_ia = top_score * 100
+                if any(x in label for x in ['fake', 'ai', 'synthetic', '1', 'spoof']):
+                    porcentaje_ia = score * 100
                 else:
-                    porcentaje_ia = (1.0 - top_score) * 100
+                    porcentaje_ia = (1.0 - score) * 100
                     
                 desglose_ui = {
                     "espectrograma_natural": round(100 - porcentaje_ia, 1),
