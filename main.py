@@ -6,6 +6,7 @@ import cv2
 import tempfile
 from pypdf import PdfReader
 import io
+import time  # <-- LIBRERÍA AÑADIDA PARA ESPERAR AL SERVIDOR
 
 app = FastAPI()
 
@@ -27,22 +28,44 @@ def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_t
     respuesta = requests.post(url, files=archivos, data=datos)
     return respuesta.json()
 
-def analizar_texto_hf(texto: str):
-    """Motor NLP para detectar ChatGPT en documentos"""
+def analizar_texto_hf(texto: str, max_intentos=3):
+    """Motor NLP para detectar ChatGPT en documentos con reintento automático"""
     url = f"https://router.huggingface.co/hf-inference/models/{HF_TEXT_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     
     # Recortamos el texto a los primeros 1500 caracteres para no saturar la API
-    respuesta = requests.post(url, headers=headers, json={"inputs": texto[:1500]})
-    return respuesta.json()
+    for intento in range(max_intentos):
+        respuesta = requests.post(url, headers=headers, json={"inputs": texto[:1500]})
+        
+        if respuesta.status_code == 503:
+            datos = respuesta.json()
+            tiempo_espera = datos.get("estimated_time", 20.0)
+            print(f"[INFO] Despertando modelo de texto. Esperando {tiempo_espera}s...")
+            time.sleep(tiempo_espera + 2)
+            continue
+            
+        return respuesta.json()
+        
+    return {"error": "El servidor de lenguaje no despertó a tiempo. Intenta de nuevo."}
 
-def analizar_audio_hf(audio_bytes: bytes):
-    """Motor de frecuencias para detectar clonación de voz"""
+def analizar_audio_hf(audio_bytes: bytes, max_intentos=3):
+    """Motor de frecuencias para detectar clonación de voz con reintento automático"""
     url = f"https://router.huggingface.co/hf-inference/models/{HF_AUDIO_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/octet-stream"}
     
-    respuesta = requests.post(url, headers=headers, data=audio_bytes)
-    return respuesta.json()
+    for intento in range(max_intentos):
+        respuesta = requests.post(url, headers=headers, data=audio_bytes)
+        
+        if respuesta.status_code == 503:
+            datos = respuesta.json()
+            tiempo_espera = datos.get("estimated_time", 20.0)
+            print(f"[INFO] Despertando modelo de audio. Esperando {tiempo_espera}s...")
+            time.sleep(tiempo_espera + 2)
+            continue
+            
+        return respuesta.json()
+        
+    return {"error": "El servidor de espectrogramas no despertó a tiempo. Intenta de nuevo."}
 
 @app.post("/analizar")
 async def analizar_archivo(file: UploadFile = File(...)):
@@ -65,7 +88,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
             
             if res.get("status") == "success":
                 porcentaje_ia = res.get("type", {}).get("ai_generated", 0.0) * 100
-                # Desglose simulado para nutrir la Interfaz Gráfica de Flutter
                 desglose_ui = {
                     "coherencia_optica": round(100 - porcentaje_ia + (porcentaje_ia * 0.1), 1),
                     "integridad_metadatos": 95.0 if porcentaje_ia < 50 else 12.5,
@@ -79,14 +101,12 @@ async def analizar_archivo(file: UploadFile = File(...)):
         # ==========================================
         elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
             tipo_evidencia = "VIDEO"
-            # Guardamos el video temporalmente para extraer 1 frame clave
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
                 temp_video.write(contenido)
                 ruta_temp = temp_video.name
                 
             try:
                 captura = cv2.VideoCapture(ruta_temp)
-                # Tomamos un frame al 50% del video
                 total_frames = int(captura.get(cv2.CAP_PROP_FRAME_COUNT))
                 captura.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.5))
                 exito, frame = captura.read()
@@ -110,7 +130,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
             tipo_evidencia = "DOCUMENTO"
             lector = PdfReader(io.BytesIO(contenido))
             texto_extraido = ""
-            for pagina in lector.pages[:3]: # Leemos max 3 páginas
+            for pagina in lector.pages[:3]:
                 texto_extraido += pagina.extract_text() + " "
                 
             if len(texto_extraido.strip()) < 50:
@@ -118,7 +138,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
             else:
                 res = analizar_texto_hf(texto_extraido)
                 if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
-                    # El modelo devuelve [{'label': 'Human', 'score': 0.99}, {'label': 'ChatGPT', 'score': 0.01}]
                     datos_scores = res[0]
                     for item in datos_scores:
                         if item['label'] == 'ChatGPT':
@@ -129,7 +148,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
                         "patrones_chatgpt": round(porcentaje_ia, 1)
                     }
                 else:
-                    error_api = "El servidor de lenguaje está cargando. Reintenta en 20s."
+                    error_api = res.get("error", "Error desconocido al procesar el documento PDF.")
 
         # ==========================================
         # 4. MÓDULO DE AUDIO (Deepfakes de Voz)
@@ -138,7 +157,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
             tipo_evidencia = "AUDIO"
             res = analizar_audio_hf(contenido)
             if isinstance(res, list) and len(res) > 0:
-                # Ordenamos para obtener el score más alto
                 res_ordenado = sorted(res, key=lambda x: x['score'], reverse=True)
                 top_label = res_ordenado[0]['label'].lower()
                 top_score = res_ordenado[0]['score']
@@ -153,7 +171,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
                     "frecuencias_sinteticas": round(porcentaje_ia, 1)
                 }
             else:
-                error_api = "El servidor de espectrogramas está cargando. Reintenta en 20s."
+                error_api = res.get("error", "Error desconocido al procesar el audio.")
 
         else:
             error_api = "Formato de archivo no soportado por ForensIA."
@@ -166,7 +184,6 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 "analisis": {"nivel_riesgo": "ERROR", "motivo": error_api, "porcentaje_ia": 0.0}
             }
 
-        # Determinamos el riesgo final
         if porcentaje_ia > 75.0:
             nivel_riesgo = "ALTO"
             motivo = "Alta probabilidad de generación algorítmica profunda (Sintético)."
@@ -185,7 +202,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 "porcentaje_ia": round(porcentaje_ia, 2),
                 "nivel_riesgo": nivel_riesgo,
                 "motivo": motivo,
-                "desglose_ui": desglose_ui # <-- AQUÍ ESTÁ LA MAGIA PARA FLUTTER
+                "desglose_ui": desglose_ui
             }
         }
 
