@@ -16,10 +16,10 @@ API_USER = os.getenv("SIGHTENGINE_USER")
 API_SECRET = os.getenv("SIGHTENGINE_SECRET")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Modelos Especializados de Hugging Face
+# --- MODELOS ACTUALIZADOS ---
 HF_TEXT_MODEL = "Hello-SimpleAI/chatgpt-detector-roberta"
-# NUEVO MODELO DE AUDIO (Estable y Activo)
-HF_AUDIO_MODEL = "DunnBC22/wav2vec2-base-Deepfake_Audio_Detection"
+# NUEVO MODELO DE AUDIO ACTIVO EN HUGGING FACE
+HF_AUDIO_MODEL = "MelodyMachine/Deepfake-audio-detection-V2" 
 
 def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_type: str):
     """Motor comercial para Imágenes"""
@@ -47,7 +47,6 @@ def analizar_texto_hf(texto: str, max_intentos=3):
             time.sleep(tiempo_espera + 2)
             continue
             
-        # Verificamos si Hugging Face dio error antes de leer el JSON
         if respuesta.status_code != 200:
             return {"error": f"Hugging Face rechazó el documento (Código HTTP {respuesta.status_code})."}
             
@@ -75,9 +74,8 @@ def analizar_audio_hf(audio_bytes: bytes, max_intentos=3):
             time.sleep(tiempo_espera + 2)
             continue
             
-        # Verificamos si Hugging Face dio error antes de leer el JSON
         if respuesta.status_code != 200:
-            return {"error": f"El modelo de audio falló o no está disponible (Código HTTP {respuesta.status_code})."}
+            return {"error": f"El modelo de audio falló o fue retirado (Código HTTP {respuesta.status_code})."}
             
         try:
             return respuesta.json()
@@ -149,18 +147,16 @@ async def analizar_archivo(file: UploadFile = File(...)):
             tipo_evidencia = "DOCUMENTO"
             texto_extraido = ""
             
-            # Lógica para extraer texto de PDF
             if nombre_archivo.endswith('.pdf'):
                 lector = PdfReader(io.BytesIO(contenido))
-                for pagina in lector.pages[:3]: # Leemos max 3 páginas
+                for pagina in lector.pages[:3]:
                     texto = pagina.extract_text()
                     if texto:
                         texto_extraido += texto + " "
                     
-            # Lógica para extraer texto de Word (DOCX)
             elif nombre_archivo.endswith('.docx'):
                 documento = docx.Document(io.BytesIO(contenido))
-                for parrafo in documento.paragraphs[:20]: # Leemos max 20 párrafos
+                for parrafo in documento.paragraphs[:20]:
                     if parrafo.text:
                         texto_extraido += parrafo.text + " "
                 
@@ -172,7 +168,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 if isinstance(res, list) and len(res) > 0:
                     datos_scores = res[0] if isinstance(res[0], list) else res
                     
-                    # LÓGICA INVENCIBLE: Buscar el puntaje más alto
+                    # LÓGICA INVENCIBLE: Sacamos la etiqueta con mayor puntaje
                     mejor_resultado = max(datos_scores, key=lambda x: x.get('score', 0.0))
                     label = str(mejor_resultado.get('label', '')).lower()
                     score = mejor_resultado.get('score', 0.0)
@@ -199,7 +195,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
             res = analizar_audio_hf(contenido)
             
             if isinstance(res, list) and len(res) > 0:
-                # LÓGICA INVENCIBLE: Buscar el puntaje más alto
+                # LÓGICA INVENCIBLE: Extraemos el de mayor puntaje
                 mejor_resultado = max(res, key=lambda x: x.get('score', 0.0))
                 label = str(mejor_resultado.get('label', '')).lower()
                 score = mejor_resultado.get('score', 0.0)
