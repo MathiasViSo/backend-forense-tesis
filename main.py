@@ -5,7 +5,7 @@ import requests
 import cv2
 import tempfile
 from pypdf import PdfReader
-import docx  # <-- NUEVA LIBRERÍA PARA LEER WORD
+import docx  # <-- LIBRERÍA PARA LEER WORD
 import io
 import time
 
@@ -30,7 +30,7 @@ def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_t
     return respuesta.json()
 
 def analizar_texto_hf(texto: str, max_intentos=3):
-    """Motor NLP para detectar ChatGPT en documentos con reintento automático"""
+    """Motor NLP con blindaje y reintento automático"""
     url = f"https://router.huggingface.co/hf-inference/models/{HF_TEXT_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     
@@ -38,18 +38,27 @@ def analizar_texto_hf(texto: str, max_intentos=3):
         respuesta = requests.post(url, headers=headers, json={"inputs": texto[:1500]})
         
         if respuesta.status_code == 503:
-            datos = respuesta.json()
-            tiempo_espera = datos.get("estimated_time", 20.0)
+            try:
+                tiempo_espera = respuesta.json().get("estimated_time", 20.0)
+            except:
+                tiempo_espera = 20.0
             print(f"[INFO] Despertando modelo de texto. Esperando {tiempo_espera}s...")
             time.sleep(tiempo_espera + 2)
             continue
             
-        return respuesta.json()
-        
-    return {"error": "El servidor de lenguaje no despertó a tiempo. Intenta de nuevo."}
+        # Verificamos si Hugging Face dio error antes de leer el JSON
+        if respuesta.status_code != 200:
+            return {"error": f"Hugging Face rechazó el documento (Código HTTP {respuesta.status_code})."}
+            
+        try:
+            return respuesta.json()
+        except:
+            return {"error": "El servidor de IA devolvió una respuesta ilegible."}
+            
+    return {"error": "El servidor de lenguaje no despertó a tiempo."}
 
 def analizar_audio_hf(audio_bytes: bytes, max_intentos=3):
-    """Motor de frecuencias para detectar clonación de voz con reintento automático"""
+    """Motor de frecuencias blindado contra caídas del modelo"""
     url = f"https://router.huggingface.co/hf-inference/models/{HF_AUDIO_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/octet-stream"}
     
@@ -57,15 +66,24 @@ def analizar_audio_hf(audio_bytes: bytes, max_intentos=3):
         respuesta = requests.post(url, headers=headers, data=audio_bytes)
         
         if respuesta.status_code == 503:
-            datos = respuesta.json()
-            tiempo_espera = datos.get("estimated_time", 20.0)
+            try:
+                tiempo_espera = respuesta.json().get("estimated_time", 20.0)
+            except:
+                tiempo_espera = 20.0
             print(f"[INFO] Despertando modelo de audio. Esperando {tiempo_espera}s...")
             time.sleep(tiempo_espera + 2)
             continue
             
-        return respuesta.json()
-        
-    return {"error": "El servidor de espectrogramas no despertó a tiempo. Intenta de nuevo."}
+        # Verificamos si Hugging Face dio error antes de leer el JSON
+        if respuesta.status_code != 200:
+            return {"error": f"El modelo de audio falló o no está disponible (Código HTTP {respuesta.status_code})."}
+            
+        try:
+            return respuesta.json()
+        except:
+            return {"error": "El analizador de espectrogramas devolvió un formato inválido."}
+            
+    return {"error": "El servidor de espectrogramas no respondió a tiempo."}
 
 @app.post("/analizar")
 async def analizar_archivo(file: UploadFile = File(...)):
@@ -134,30 +152,51 @@ async def analizar_archivo(file: UploadFile = File(...)):
             if nombre_archivo.endswith('.pdf'):
                 lector = PdfReader(io.BytesIO(contenido))
                 for pagina in lector.pages[:3]: # Leemos max 3 páginas
-                    texto_extraido += pagina.extract_text() + " "
+                    texto = pagina.extract_text()
+                    if texto:
+                        texto_extraido += texto + " "
                     
             # Lógica para extraer texto de Word (DOCX)
             elif nombre_archivo.endswith('.docx'):
                 documento = docx.Document(io.BytesIO(contenido))
                 for parrafo in documento.paragraphs[:20]: # Leemos max 20 párrafos
-                    texto_extraido += parrafo.text + " "
+                    if parrafo.text:
+                        texto_extraido += parrafo.text + " "
                 
             if len(texto_extraido.strip()) < 50:
                 error_api = "El documento está vacío o es una imagen escaneada sin texto seleccionable."
             else:
                 res = analizar_texto_hf(texto_extraido)
-                if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
-                    datos_scores = res[0]
+                
+                if isinstance(res, list) and len(res) > 0:
+                    # El Parche: A veces devuelve [[{...}]] y otras veces [{...}]
+                    datos_scores = res[0] if isinstance(res[0], list) else res
+                    
+                    encontro_ia = False
                     for item in datos_scores:
-                        if item['label'] == 'ChatGPT':
+                        etiqueta = str(item.get('label', '')).lower()
+                        # Buscamos variaciones en el nombre de la etiqueta IA
+                        if 'chatgpt' in etiqueta or 'fake' in etiqueta or '1' in etiqueta or 'ai' in etiqueta:
                             porcentaje_ia = item['score'] * 100
+                            encontro_ia = True
+                            break
+                            
+                    # Si solo devolvió la etiqueta Humano, invertimos
+                    if not encontro_ia:
+                        for item in datos_scores:
+                            etiqueta = str(item.get('label', '')).lower()
+                            if 'human' in etiqueta or 'real' in etiqueta or '0' in etiqueta:
+                                porcentaje_ia = (1.0 - item['score']) * 100
+                                break
                     
                     desglose_ui = {
                         "perplejidad_linguistica": round(100 - porcentaje_ia, 1),
                         "patrones_chatgpt": round(porcentaje_ia, 1)
                     }
-                else:
+                elif isinstance(res, dict) and "error" in res:
                     error_api = res.get("error", "Error desconocido al procesar el documento.")
+                else:
+                    error_api = "Estructura de respuesta no reconocida del servidor de lenguaje."
 
         # ==========================================
         # 4. MÓDULO DE AUDIO
@@ -179,8 +218,10 @@ async def analizar_archivo(file: UploadFile = File(...)):
                     "espectrograma_natural": round(100 - porcentaje_ia, 1),
                     "frecuencias_sinteticas": round(porcentaje_ia, 1)
                 }
+            elif isinstance(res, dict) and "error" in res:
+                 error_api = res.get("error", "Error desconocido al procesar el audio.")
             else:
-                error_api = res.get("error", "Error desconocido al procesar el audio.")
+                error_api = "Formato de respuesta desconocido del analizador de audio."
 
         else:
             error_api = "Formato de archivo no soportado por ForensIA."
