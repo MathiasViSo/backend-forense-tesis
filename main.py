@@ -10,6 +10,9 @@ import io
 import time
 
 app = FastAPI()
+@app.get("/")
+def home():
+    return {"estado": "API ForensIA v3.0 - Activa y Multimodal"}
 
 # --- CREDENCIALES EMPRESARIALES E HÍBRIDAS ---
 API_USER = os.getenv("SIGHTENGINE_USER")
