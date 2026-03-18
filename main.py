@@ -18,8 +18,8 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 # Modelos Especializados de Hugging Face
 HF_TEXT_MODEL = "Hello-SimpleAI/chatgpt-detector-roberta"
-# NUEVO MODELO DE AUDIO (Verificado y Activo)
-HF_AUDIO_MODEL = "mo-thecreator/Deepfake-audio-detection"
+# MODELO DE AUDIO ACTIVO Y VERIFICADO
+HF_AUDIO_MODEL = "MelodyMachine/Deepfake-audio-detection-V2"
 
 def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_type: str):
     """Motor comercial para Imágenes"""
@@ -32,8 +32,8 @@ def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_t
 
 def analizar_texto_hf(texto: str, max_intentos=3):
     """Motor NLP con blindaje y reintento automático"""
-    # PARCHE: URL Oficial Pública de Inference
-    url = f"https://api-inference.huggingface.co/models/{HF_TEXT_MODEL}"
+    # URL MODERNA (Enrutador oficial de Hugging Face)
+    url = f"https://router.huggingface.co/hf-inference/models/{HF_TEXT_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     
     for intento in range(max_intentos):
@@ -60,8 +60,8 @@ def analizar_texto_hf(texto: str, max_intentos=3):
 
 def analizar_audio_hf(audio_bytes: bytes, max_intentos=3):
     """Motor de frecuencias blindado contra caídas del modelo"""
-    # PARCHE: URL Oficial Pública de Inference
-    url = f"https://api-inference.huggingface.co/models/{HF_AUDIO_MODEL}"
+    # URL MODERNA (Enrutador oficial de Hugging Face)
+    url = f"https://router.huggingface.co/hf-inference/models/{HF_AUDIO_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/octet-stream"}
     
     for intento in range(max_intentos):
