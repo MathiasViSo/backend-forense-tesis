@@ -18,7 +18,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 # Modelos Especializados de Hugging Face
 HF_TEXT_MODEL = "Hello-SimpleAI/chatgpt-detector-roberta"
-HF_AUDIO_MODEL = "ResembleAI/ai_detector_audio"
+HF_AUDIO_MODEL = "mrfakename/Wav2Vec2-LJSpeech-AI-Audio-Detector"
 
 def analizar_con_sightengine(contenido_bytes: bytes, nombre_archivo: str, mime_type: str):
     """Motor comercial para Imágenes"""
