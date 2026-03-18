@@ -5,8 +5,9 @@ import requests
 import cv2
 import tempfile
 from pypdf import PdfReader
+import docx  # <-- NUEVA LIBRERÍA PARA LEER WORD
 import io
-import time  # <-- LIBRERÍA AÑADIDA PARA ESPERAR AL SERVIDOR
+import time
 
 app = FastAPI()
 
@@ -33,7 +34,6 @@ def analizar_texto_hf(texto: str, max_intentos=3):
     url = f"https://router.huggingface.co/hf-inference/models/{HF_TEXT_MODEL}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     
-    # Recortamos el texto a los primeros 1500 caracteres para no saturar la API
     for intento in range(max_intentos):
         respuesta = requests.post(url, headers=headers, json={"inputs": texto[:1500]})
         
@@ -97,7 +97,7 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 error_api = res.get('error', {}).get('message', 'Fallo en Sightengine')
 
         # ==========================================
-        # 2. MÓDULO DE VIDEO (Extracción de Frame)
+        # 2. MÓDULO DE VIDEO
         # ==========================================
         elif nombre_archivo.endswith(('.mp4', '.avi', '.mov')):
             tipo_evidencia = "VIDEO"
@@ -124,17 +124,26 @@ async def analizar_archivo(file: UploadFile = File(...)):
                 os.remove(ruta_temp)
 
         # ==========================================
-        # 3. MÓDULO DE DOCUMENTOS (Detección de Texto)
+        # 3. MÓDULO DE DOCUMENTOS (PDF y DOCX)
         # ==========================================
-        elif nombre_archivo.endswith('.pdf'):
+        elif nombre_archivo.endswith(('.pdf', '.docx')):
             tipo_evidencia = "DOCUMENTO"
-            lector = PdfReader(io.BytesIO(contenido))
             texto_extraido = ""
-            for pagina in lector.pages[:3]:
-                texto_extraido += pagina.extract_text() + " "
+            
+            # Lógica para extraer texto de PDF
+            if nombre_archivo.endswith('.pdf'):
+                lector = PdfReader(io.BytesIO(contenido))
+                for pagina in lector.pages[:3]: # Leemos max 3 páginas
+                    texto_extraido += pagina.extract_text() + " "
+                    
+            # Lógica para extraer texto de Word (DOCX)
+            elif nombre_archivo.endswith('.docx'):
+                documento = docx.Document(io.BytesIO(contenido))
+                for parrafo in documento.paragraphs[:20]: # Leemos max 20 párrafos
+                    texto_extraido += parrafo.text + " "
                 
             if len(texto_extraido.strip()) < 50:
-                error_api = "El PDF está vacío o es una imagen escaneada sin texto seleccionable."
+                error_api = "El documento está vacío o es una imagen escaneada sin texto seleccionable."
             else:
                 res = analizar_texto_hf(texto_extraido)
                 if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
@@ -148,10 +157,10 @@ async def analizar_archivo(file: UploadFile = File(...)):
                         "patrones_chatgpt": round(porcentaje_ia, 1)
                     }
                 else:
-                    error_api = res.get("error", "Error desconocido al procesar el documento PDF.")
+                    error_api = res.get("error", "Error desconocido al procesar el documento.")
 
         # ==========================================
-        # 4. MÓDULO DE AUDIO (Deepfakes de Voz)
+        # 4. MÓDULO DE AUDIO
         # ==========================================
         elif nombre_archivo.endswith(('.mp3', '.wav', '.ogg')):
             tipo_evidencia = "AUDIO"
