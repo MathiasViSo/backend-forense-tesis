@@ -25,7 +25,7 @@ HF_AUDIO_MODEL = "MelodyMachine/Deepfake-audio-detection-V2"
 # =========================================================
 # 🚨 MODO DE SUSTENTACIÓN (TESIS) 🚨
 # =========================================================
-MODO_TESIS = True 
+MODO_TESIS = False 
 
 class EnlaceRequest(BaseModel):
     url: str
