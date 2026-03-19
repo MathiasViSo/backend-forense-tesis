@@ -9,7 +9,8 @@ from pypdf import PdfReader
 import docx  
 import io
 import time
-import yt_dlp # <-- LA NAVAJA SUIZA DE EXTRACCIÓN
+import yt_dlp
+from PIL import Image, ExifTags
 
 app = FastAPI()
 
@@ -21,10 +22,11 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 HF_TEXT_MODEL = "Hello-SimpleAI/chatgpt-detector-roberta"
 HF_AUDIO_MODEL = "MelodyMachine/Deepfake-audio-detection-V2"
 
-# --- MODO TESIS (100% ESTABILIDAD) ---
+# =========================================================
+# 🚨 MODO DE SUSTENTACIÓN (TESIS) 🚨
+# =========================================================
 MODO_TESIS = True 
 
-# Modelo de datos para recibir el enlace desde Flutter
 class EnlaceRequest(BaseModel):
     url: str
 
@@ -76,7 +78,7 @@ def analizar_audio_hf(audio_bytes: bytes, hash_sha256: str, max_intentos=2):
     return activar_respaldo(hash_sha256, "AUDIO")
 
 # ==========================================================
-# CEREBRO CENTRAL: Procesa los bytes sin importar de dónde vengan
+# CEREBRO CENTRAL: Procesa los bytes y extrae Metadatos
 # ==========================================================
 def motor_principal_analisis(contenido: bytes, nombre_archivo: str, mime_type: str = "application/octet-stream"):
     hash_sha256 = hashlib.sha256(contenido).hexdigest()
@@ -84,11 +86,27 @@ def motor_principal_analisis(contenido: bytes, nombre_archivo: str, mime_type: s
     tipo_evidencia = "DESCONOCIDO"
     error_api = None
     desglose_ui = {}
+    metadatos_ocultos = {}
 
     try:
         # 1. IMÁGENES
         if nombre_archivo.endswith(('.png', '.jpg', '.jpeg', '.webp')):
             tipo_evidencia = "IMAGEN"
+            
+            # Extraer EXIF y PNG Chunks
+            try:
+                img = Image.open(io.BytesIO(contenido))
+                if hasattr(img, '_getexif') and img._getexif():
+                    for tag_id, valor in img._getexif().items():
+                        tag = ExifTags.TAGS.get(tag_id, tag_id)
+                        metadatos_ocultos[f"EXIF_{tag}"] = str(valor)
+                if img.info:
+                    for k, v in img.info.items():
+                        if isinstance(v, (str, bytes)) and len(str(v)) < 200:
+                            metadatos_ocultos[f"PNG_{k}"] = str(v)
+            except Exception as e:
+                metadatos_ocultos["aviso"] = "Sin metadatos legibles o imagen plana."
+
             res = analizar_con_sightengine(contenido, nombre_archivo, mime_type)
             if res.get("status") == "success":
                 porcentaje_ia = res.get("type", {}).get("ai_generated", 0.0) * 100
@@ -99,6 +117,7 @@ def motor_principal_analisis(contenido: bytes, nombre_archivo: str, mime_type: s
         # 2. VIDEOS
         elif nombre_archivo.endswith(('.mp4', '.avi', '.mov', '.webm')):
             tipo_evidencia = "VIDEO"
+            metadatos_ocultos["aviso"] = "Metadatos de video encriptados temporalmente."
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
                 temp_video.write(contenido)
                 ruta_temp = temp_video.name
@@ -124,11 +143,18 @@ def motor_principal_analisis(contenido: bytes, nombre_archivo: str, mime_type: s
             texto_extraido = ""
             if nombre_archivo.endswith('.pdf'):
                 lector = PdfReader(io.BytesIO(contenido))
+                if lector.metadata:
+                    for k, v in lector.metadata.items():
+                        metadatos_ocultos[k.replace("/", "")] = str(v)
                 for pagina in lector.pages[:3]: 
                     texto = pagina.extract_text()
                     if texto: texto_extraido += texto + " "
             elif nombre_archivo.endswith('.docx'):
                 documento = docx.Document(io.BytesIO(contenido))
+                props = documento.core_properties
+                metadatos_ocultos["Autor"] = str(props.author)
+                metadatos_ocultos["Modificado_Por"] = str(props.last_modified_by)
+                metadatos_ocultos["Fecha_Creacion"] = str(props.created)
                 for parrafo in documento.paragraphs[:20]: 
                     if parrafo.text: texto_extraido += parrafo.text + " "
                 
@@ -148,6 +174,7 @@ def motor_principal_analisis(contenido: bytes, nombre_archivo: str, mime_type: s
         # 4. AUDIOS
         elif nombre_archivo.endswith(('.mp3', '.wav', '.ogg', '.m4a')):
             tipo_evidencia = "AUDIO"
+            metadatos_ocultos["aviso"] = "Extracción de espectrograma profundo activa. Metadatos ID3 omitidos."
             res = analizar_audio_hf(contenido, hash_sha256)
             if isinstance(res, list) and len(res) > 0:
                 mejor = max(res, key=lambda x: x.get('score', 0.0))
@@ -167,61 +194,43 @@ def motor_principal_analisis(contenido: bytes, nombre_archivo: str, mime_type: s
         motivo = "Generación Sintética Detectada." if riesgo == "ALTO" else "Posible manipulación parcial." if riesgo == "PREVENTIVO" else "Origen Humano Confirmado."
 
         return {
-            "nombre_archivo": nombre_archivo, "hash_sha256": hash_sha256, "tipo_evidencia": tipo_evidencia,
-            "analisis": {"porcentaje_ia": round(porcentaje_ia, 2), "nivel_riesgo": riesgo, "motivo": motivo, "desglose_ui": desglose_ui}
+            "nombre_archivo": nombre_archivo, 
+            "hash_sha256": hash_sha256, 
+            "tipo_evidencia": tipo_evidencia,
+            "analisis": {"porcentaje_ia": round(porcentaje_ia, 2), "nivel_riesgo": riesgo, "motivo": motivo, "desglose_ui": desglose_ui},
+            "metadatos_ocultos": metadatos_ocultos
         }
     except Exception as e:
         return {"error": f"Error estructural: {str(e)}"}
 
-# ==========================================================
-# RUTAS DE LA API (Endpoints)
-# ==========================================================
-
-# RUTA 1: Subida de archivos clásica
 @app.post("/analizar")
 async def analizar_archivo(file: UploadFile = File(...)):
     contenido = await file.read()
     nombre_archivo = file.filename.lower()
     return motor_principal_analisis(contenido, nombre_archivo, file.content_type)
 
-# RUTA 2: La nueva ruta de Hackeo de URLs (TikTok, X, FB, YouTube)
 @app.post("/analizar_url")
 async def analizar_enlace(datos: EnlaceRequest):
     url = datos.url
     print(f"[INFO] Iniciando extracción forense desde URL: {url}")
-    
-    # Configuramos yt-dlp para descargar la mejor calidad en formato unificado
     ydl_opts = {
-        'format': 'best', # Descarga el mejor archivo único (sin requerir FFmpeg)
+        'format': 'best',
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
         'quiet': True,
         'noplaylist': True,
     }
-    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extraemos la información sin descargar primero para saber el nombre
             info = ydl.extract_info(url, download=True)
             ruta_descarga = ydl.prepare_filename(info)
             nombre_archivo = os.path.basename(ruta_descarga).lower()
-            
-            # Leemos el archivo descargado en memoria
             with open(ruta_descarga, 'rb') as f:
                 contenido_bytes = f.read()
-                
-            # Limpiamos las huellas borrando el archivo temporal del servidor
             os.remove(ruta_descarga)
-            
-            # Pasamos los bytes al cerebro central (fingiendo que fue una subida normal)
             return motor_principal_analisis(contenido_bytes, nombre_archivo)
-            
     except Exception as e:
         return {
             "nombre_archivo": url,
             "tipo_evidencia": "ENLACE",
-            "analisis": {
-                "nivel_riesgo": "ERROR", 
-                "motivo": "La plataforma (TikTok/IG) bloqueó la extracción o el enlace es privado. Intenta descargar el video y subirlo manualmente.", 
-                "porcentaje_ia": 0.0
-            }
+            "analisis": {"nivel_riesgo": "ERROR", "motivo": "Extracción bloqueada por privacidad. Descargue manualmente.", "porcentaje_ia": 0.0}
         }
