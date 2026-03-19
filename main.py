@@ -188,7 +188,13 @@ def motor_principal_analisis(contenido: bytes, nombre_archivo: str, mime_type: s
         else:
             error_api = "Formato no soportado."
 
-        if error_api: return {"nombre_archivo": nombre_archivo, "tipo_evidencia": tipo_evidencia, "analisis": {"nivel_riesgo": "ERROR", "motivo": error_api, "porcentaje_ia": 0.0}}
+        if error_api: 
+            return {
+                "nombre_archivo": nombre_archivo, 
+                "tipo_evidencia": tipo_evidencia, 
+                "analisis": {"nivel_riesgo": "ERROR", "motivo": error_api, "porcentaje_ia": 0.0},
+                "metadatos_ocultos": metadatos_ocultos # ¡AÑADIDO AQUÍ!
+            }
 
         riesgo = "ALTO" if porcentaje_ia > 75 else "PREVENTIVO" if porcentaje_ia > 25 else "BAJO"
         motivo = "Generación Sintética Detectada." if riesgo == "ALTO" else "Posible manipulación parcial." if riesgo == "PREVENTIVO" else "Origen Humano Confirmado."
@@ -201,7 +207,10 @@ def motor_principal_analisis(contenido: bytes, nombre_archivo: str, mime_type: s
             "metadatos_ocultos": metadatos_ocultos
         }
     except Exception as e:
-        return {"error": f"Error estructural: {str(e)}"}
+        return {
+            "error": f"Error estructural: {str(e)}",
+            "metadatos_ocultos": {"Aviso": "Fallo crítico del sistema."} # ¡AÑADIDO AQUÍ TAMBIÉN!
+        }
 
 @app.post("/analizar")
 async def analizar_archivo(file: UploadFile = File(...)):
